@@ -35,9 +35,14 @@ def command_ingest(args: argparse.Namespace) -> None:
     configure_logging()
     pipelines = ApplicationPipelines(config)
     context = build_context(args)
-    parsed = pipelines.ingest_paths([Path(p) for p in args.paths], context)
-    pipelines.index_parsed(parsed)
-    print(f"Индексировано норм: {len(parsed.norms)}")
+
+    def log_progress(message: str) -> None:
+        print(message)
+
+    result = pipelines.ingest_paths([Path(p) for p in args.paths], context, progress=log_progress)
+    stats = pipelines.index_parsed(result.parsed, progress=log_progress)
+    print(f"Обработано документов: {len(result.documents)}")
+    print(f"Индексировано норм: {stats.norms_indexed}")
 
 
 def command_search(args: argparse.Namespace) -> None:
