@@ -75,6 +75,29 @@ bdlaw answer --query "Как взыскиваются проценты по ст
 bdlaw tests golden_set.example.json --k 8
 ```
 
+### Быстрый старт на демо-наборе
+
+В репозитории лежит небольшой образец `data/samples/gk_excerpt.txt`, покрывающий статьи 12, 309, 310 и 395 ГК РФ, а также JSONL с готовыми нормами `data/samples/laws.sample.jsonl` (для изучения структуры payload).
+
+```bash
+# Импортируем и индексируем демо-текст
+bdlaw ingest data/samples/gk_excerpt.txt \
+  --law-code "ГК РФ" \
+  --law-full-title "Гражданский кодекс РФ (часть первая)" \
+  --version-id 2024-09-01 \
+  --valid-from 2024-09-01 \
+  --source-url https://publication.pravo.gov.ru/Document/View/0001202409010001
+
+# Проверяем поиск и ответы
+bdlaw search --query "проценты по денежному обязательству" --law-code "ГК РФ" --date 2024-10-01 --k 5
+bdlaw answer --query "Какие способы защиты гражданских прав?" --law-code "ГК РФ" --date 2024-10-01 --k 8
+
+# Запускаем golden-set (использует ст. 395 ГК РФ)
+bdlaw tests golden_set.example.json --k 5
+```
+
+Если Qdrant уже содержит собственные данные, воспользуйтесь экспортом `JSONL` (`bdlaw.export.jsonl`) и снапшотами Qdrant для бэкапов.
+
 ## GUI
 
 ```bash
