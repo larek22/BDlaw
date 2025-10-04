@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from bdlaw.index.schema import NormPayload
 from bdlaw.ingest.base import Document
+from bdlaw.normalize.offsets import project_relative_span
 from bdlaw.parser.amendments import extract_amendments
 from bdlaw.parser.annotations import extract_annotations
 from bdlaw.parser.crossrefs import extract_cross_refs
@@ -79,6 +80,7 @@ def parse_document(document: Document, context: ParsingContext) -> ParsedDocumen
 
     raw_text = document.metadata.get("raw_text") or document.raw_text
     base_text = document.metadata.get("clean_text") or document.raw_text
+    offset_map = document.metadata.get("clean_to_raw_map") or []
     sections = _extract_sections(base_text)
     structure, current_division, current_chapter, current_section = _initialize_structure(base_text, sections)
     if current_chapter and not current_section:
@@ -127,6 +129,8 @@ def parse_document(document: Document, context: ParsingContext) -> ParsedDocumen
                     part_label=part_slice.label,
                     slice_=point_slice,
                     raw_text=raw_text,
+                    base_text=base_text,
+                    offset_map=offset_map,
                 )
                 norms.extend(point_norms)
                 part_node.points.append(point_node)
@@ -277,12 +281,16 @@ def _build_norms_for_slice(
     part_label: Optional[str],
     slice_: PointSlice,
     raw_text: str,
+    base_text: str,
+    offset_map: List[int],
 ) -> Tuple[List[NormPayload], PointNode]:
-    raw_segment = raw_text[slice_.start : slice_.end]
-    stripped = _strip_headings(raw_segment)
-    text_without_amendments, amendments = extract_amendments(stripped)
+    clean_segment = base_text[slice_.start : slice_.end]
+    stripped_clean, heading_shift = _strip_headings(clean_segment)
+    text_without_amendments, amendments = extract_amendments(stripped_clean)
     text_without_annotations, annotations = extract_annotations(text_without_amendments)
     clean_text = _normalize_whitespace(text_without_annotations)
+    raw_start, raw_end = project_relative_span((slice_.start, slice_.end), offset_map, len(raw_text))
+    raw_segment = raw_text[raw_start:raw_end]
     cross_refs = extract_cross_refs(clean_text, context.law_code)
     point_node = PointNode(
         label=slice_.point,
@@ -298,21 +306,22 @@ def _build_norms_for_slice(
         part_label=part_label,
         point_label=slice_.point,
         subpoint_label=slice_.subpoint,
-        raw_text=raw_segment.strip(),
+        raw_text=raw_segment,
         clean_text=clean_text,
         amendments=amendments,
         annotations=annotations,
         cross_refs=cross_refs,
-        span=(slice_.start, slice_.end),
+        span=(raw_start, raw_end),
         page_spans=document.metadata.get("page_spans", []),
         file_origin=str(document.path),
     )
     payloads = [base_payload]
     if slice_.subpoint is None:
-        list_segments = split_semicolon_list(stripped, slice_.start)
+        list_segments = split_semicolon_list(stripped_clean, slice_.start + heading_shift)
         for idx, segment in enumerate(list_segments, start=1):
             segment_clean = _normalize_whitespace(segment.text)
             subpoint_node = SubpointNode(label=str(idx), text=segment_clean, start=segment.offsets[0], end=segment.offsets[1])
+            raw_segment_start, raw_segment_end = project_relative_span(segment.offsets, offset_map, len(raw_text))
             point_node.subpoints.append(subpoint_node)
             payloads.append(
                 _create_payload(
@@ -322,12 +331,12 @@ def _build_norms_for_slice(
                     part_label=part_label,
                     point_label=slice_.point,
                     subpoint_label=str(idx),
-                    raw_text=segment.text,
+                    raw_text=raw_text[raw_segment_start:raw_segment_end],
                     clean_text=segment_clean,
                     amendments=[],
                     annotations=[],
                     cross_refs=extract_cross_refs(segment_clean, context.law_code),
-                    span=segment.offsets,
+                    span=(raw_segment_start, raw_segment_end),
                     page_spans=document.metadata.get("page_spans", []),
                     file_origin=str(document.path),
                 )
@@ -422,11 +431,18 @@ def _extract_heading_title(text: str) -> Optional[str]:
     return None
 
 
-def _strip_headings(text: str) -> str:
-    result = text.strip()
+def _strip_headings(text: str) -> Tuple[str, int]:
+    leading_trim = len(text) - len(text.lstrip())
+    working = text.lstrip()
+    shift = leading_trim
     for pattern in HEADER_STRIP_PATTERNS:
-        result = pattern.sub("", result, count=1).lstrip()
-    return result.strip()
+        match = pattern.match(working)
+        if match:
+            shift += match.end()
+            working = working[match.end():]
+            working = working.lstrip()
+    trimmed = working.strip()
+    return trimmed, shift
 
 
 def _normalize_whitespace(text: str) -> str:

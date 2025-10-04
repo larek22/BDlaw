@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from bdlaw.search.service import SearchResult
 from bdlaw.testsuite.runner import GoldenQuery, TestSuiteRunner
 
@@ -57,4 +59,31 @@ def test_testsuite_metrics():
     assert report.precision_at_k == 0.5
     assert report.mrr_at_k == 1.0
     assert report.ndcg_at_k > 0
+    assert report.answer_pass_at_k == 1.0
+
+
+def test_runner_initializes_validator_from_model(monkeypatch):
+    created = {}
+
+    class DummyAnswerValidator:
+        def __init__(self, model):
+            created["model"] = model
+
+        def validate(self, answer, citations, context_citations):
+            return SimpleNamespace(verdict="PASS", explanation="ok")
+
+    monkeypatch.setattr("bdlaw.gpt.validator.AnswerValidator", DummyAnswerValidator)
+
+    results = [
+        SearchResult(
+            citation="ГК РФ ст. 12",
+            score=1.0,
+            payload={"law_code": "ГК РФ", "article": "12", "part": None, "citation": "ГК РФ ст. 12"},
+        )
+    ]
+    runner = TestSuiteRunner(DummySearch(results), k=1, judge_model="dummy-model")
+    report = runner.run(
+        [GoldenQuery(query="", expected_norms=[{"law_code": "ГК РФ", "article": "12", "part": None}])]
+    )
+    assert created["model"] == "dummy-model"
     assert report.answer_pass_at_k == 1.0

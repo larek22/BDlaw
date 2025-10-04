@@ -83,12 +83,14 @@ def command_tests(args: argparse.Namespace) -> None:
     config = load_config()
     pipelines = ApplicationPipelines(config)
     search = SearchService(pipelines.index_pipeline.embedder, pipelines.index_pipeline.store)
-    runner = TestSuiteRunner(search, k=args.k)
+    runner = TestSuiteRunner(search, k=args.k, judge_model=config.llm.judge_model)
     suite = TestSuiteRunner.load_suite(Path(args.suite))
     report = runner.run(suite)
     print(f"Recall@{args.k}: {report.recall_at_k:.3f}")
     print(f"Precision@{args.k}: {report.precision_at_k:.3f}")
     print(f"MRR@{args.k}: {report.mrr_at_k:.3f}")
+    print(f"nDCG@{args.k}: {report.ndcg_at_k:.3f}")
+    print(f"Answer-PASS@{args.k}: {report.answer_pass_at_k:.3f}")
 
 
 def main(argv: List[str] | None = None) -> None:

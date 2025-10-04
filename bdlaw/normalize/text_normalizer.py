@@ -6,11 +6,12 @@ import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, List
 
 from bdlaw.ingest.base import Document
 
 from .patterns import HEADER_FOOTER_PATTERNS, REPLACEMENT_RULES
+from .offsets import build_offset_map
 
 HYPHEN_BREAK_RE = re.compile(r"(?<=\w)-\s*\n(?=\w)")
 MULTISPACE_RE = re.compile(r"[ \t]{2,}")
@@ -26,6 +27,7 @@ class NormalizationResult:
     raw_text: str
     clean_text: str
     stats: Dict[str, int]
+    offset_map: List[int]
 
 
 class TextNormalizer:
@@ -43,6 +45,7 @@ class TextNormalizer:
                 "clean_text": result.clean_text,
                 "normalization_stats": result.stats,
                 "yo_normalized": self.replace_yo,
+                "clean_to_raw_map": result.offset_map,
             }
         )
         return Document(
@@ -101,7 +104,13 @@ def normalize_text(text: str, *, replace_yo: bool = False) -> NormalizationResul
         stats["multiline_collapse"] += count
 
     clean_text = text.strip()
-    return NormalizationResult(raw_text=raw_text, clean_text=clean_text, stats=dict(stats))
+    offset_map = build_offset_map(raw_text, clean_text)
+    return NormalizationResult(
+        raw_text=raw_text,
+        clean_text=clean_text,
+        stats=dict(stats),
+        offset_map=offset_map,
+    )
 
 
 __all__ = ["NormalizationResult", "TextNormalizer", "normalize_document", "normalize_text"]

@@ -7,9 +7,12 @@ from dataclasses import dataclass
 from math import log2
 from pathlib import Path
 from statistics import mean
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, TYPE_CHECKING
 
 from bdlaw.search.service import SearchService, SearchResult
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from bdlaw.gpt.validator import AnswerValidator
 
 
 @dataclass
@@ -33,10 +36,15 @@ class TestSuiteRunner:
         self,
         search: SearchService,
         k: int = 5,
-        answer_validator: Optional[object] = None,
+        answer_validator: Optional["AnswerValidator"] = None,
+        judge_model: Optional[str] = None,
     ):
         self.search = search
         self.k = k
+        if answer_validator is None and judge_model:
+            from bdlaw.gpt.validator import AnswerValidator as _AnswerValidator
+
+            answer_validator = _AnswerValidator(judge_model)
         self.answer_validator = answer_validator
 
     def run(self, suite: Sequence[GoldenQuery]) -> MetricReport:

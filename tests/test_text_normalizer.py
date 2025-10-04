@@ -25,6 +25,8 @@ def test_hyphenated_words_and_staircase_removed():
     clean = document.metadata["clean_text"]
     assert "Слово" in clean
     assert "\n    " not in clean
+    mapping = document.metadata["clean_to_raw_map"]
+    assert mapping[0] == document.raw_text.index("С")
 
 
 def test_optional_yo_replacement():

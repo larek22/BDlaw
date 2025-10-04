@@ -3,6 +3,7 @@ from pathlib import Path
 
 from bdlaw.index.ids import make_hash
 from bdlaw.ingest.base import Document
+from bdlaw.normalize import normalize_document
 from bdlaw.parser.structure import ParsingContext, parse_document
 
 
@@ -77,3 +78,25 @@ def test_amendments_annotations_and_cross_refs_extracted():
 def test_citation_format_includes_version():
     parsed = parse_document(build_document("Статья 12. Часть 1. Текст."), build_context("2024-02-02"))
     assert "2024-02-02" in parsed.norms[0].citation
+
+
+def test_span_offsets_align_with_raw_text():
+    raw_text = "Статья 5.\nПункт 1. Сло-\nво восстановлено."
+    document = normalize_document(Document(path=Path("law.txt"), mime_type="text/plain", raw_text=raw_text, metadata={}))
+    document.metadata.setdefault("page_spans", [[1, 1]])
+    parsed = parse_document(document, build_context())
+    norm = parsed.norms[0]
+    start, end = norm.span_offsets[0]
+    assert document.raw_text[start:end] == norm.raw_text
+
+
+def test_subpoint_offsets_use_raw_coordinates():
+    text = (
+        "Статья 12. Пункт 1. Возмещением убытков; взысканием неустойки; иными способами."
+    )
+    document = normalize_document(Document(path=Path("law.txt"), mime_type="text/plain", raw_text=text, metadata={}))
+    document.metadata.setdefault("page_spans", [[1, 1]])
+    parsed = parse_document(document, build_context())
+    subpoint = next(norm for norm in parsed.norms if norm.subpoint == "2")
+    start, end = subpoint.span_offsets[0]
+    assert document.raw_text[start:end].strip() == subpoint.raw_text.strip()

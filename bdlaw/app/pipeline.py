@@ -13,6 +13,7 @@ from bdlaw.ingest.base import Document, ImportPipeline
 from bdlaw.ingest.docx import DOCXImporter
 from bdlaw.ingest.html import HTMLImporter
 from bdlaw.ingest.ocr import OCRImporter
+from bdlaw.ingest.odt import ODTImporter
 from bdlaw.ingest.pdf import PDFImporter
 from bdlaw.ingest.rtf import RTFImporter
 from bdlaw.ingest.text import TextImporter
@@ -52,6 +53,7 @@ class ApplicationPipelines:
                 PDFImporter(),
                 DOCXImporter(),
                 RTFImporter(),
+                ODTImporter(),
                 HTMLImporter(),
                 TextImporter(),
                 OCRImporter(config.ocr),

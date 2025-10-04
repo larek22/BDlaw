@@ -38,7 +38,7 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -e .[dev]
 ```
 
-Установите [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) и добавьте бинарь в PATH либо укажите путь в `config.yaml`. Для работы с RTF/ODT требуется установленный [Pandoc](https://pandoc.org/).
+Установите [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) и добавьте бинарь в PATH либо укажите путь в `config.yaml`. Для работы с RTF требуется установленный [Pandoc](https://pandoc.org/).
 
 ### Локальное хранилище Qdrant
 

@@ -1,4 +1,4 @@
-"""RTF/ODT importer via pypandoc."""
+"""RTF importer via pypandoc."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from bdlaw.ingest.base import Document, Importer
 
 
 class RTFImporter(Importer):
-    mime_types: Iterable[str] = ("application/rtf", "application/vnd.oasis.opendocument.text")
-    extensions: Iterable[str] = (".rtf", ".odt")
+    mime_types: Iterable[str] = ("application/rtf",)
+    extensions: Iterable[str] = (".rtf",)
 
     def supports(self, path: Path, mime_type: str) -> bool:
         return path.suffix.lower() in self.extensions or mime_type in self.mime_types
