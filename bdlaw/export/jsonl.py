@@ -6,13 +6,13 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from bdlaw.parser.structure import Norm
+from bdlaw.index.payload import NormPayload
 
 
-def export_norms_to_jsonl(norms: Iterable[Norm], path: Path) -> None:
+def export_norms_to_jsonl(norms: Iterable[NormPayload], path: Path) -> None:
     with path.open("w", encoding="utf-8") as fh:
         for norm in norms:
-            fh.write(json.dumps(norm.__dict__, ensure_ascii=False) + "\n")
+            fh.write(json.dumps(norm.model_dump(), ensure_ascii=False) + "\n")
 
 
 __all__ = ["export_norms_to_jsonl"]

@@ -16,9 +16,10 @@ from bdlaw.ingest.ocr import OCRImporter
 from bdlaw.ingest.pdf import PDFImporter
 from bdlaw.ingest.rtf import RTFImporter
 from bdlaw.ingest.text import TextImporter
+from bdlaw.index.payload import NormPayload
 from bdlaw.parser.chunker import chunk_norms
 from bdlaw.parser.normalize import normalize_document
-from bdlaw.parser.structure import Norm, ParsedDocument, ParsingContext, parse_document
+from bdlaw.parser.structure import ParsedDocument, ParsingContext, parse_document
 from bdlaw.search.service import SearchService
 from bdlaw.settings.config import AppConfig
 from bdlaw.utils.files import discover_documents
@@ -35,7 +36,7 @@ class IngestionResult:
     parsed: ParsedDocument
 
     @property
-    def norms(self) -> List[Norm]:
+    def norms(self) -> List[NormPayload]:
         return self.parsed.norms
 
 

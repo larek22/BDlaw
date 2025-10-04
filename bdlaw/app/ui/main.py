@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 from typing import Callable, Dict, List
 
@@ -319,10 +320,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.index_log.appendPlainText(message)
 
     def _remember_context(self, context: ParsingContext) -> None:
-        self._metadata_defaults = {
-            key: value or ""
-            for key, value in asdict(context).items()
-        }
+        defaults: Dict[str, str] = {}
+        for key, value in asdict(context).items():
+            if isinstance(value, date):
+                defaults[key] = value.isoformat()
+            else:
+                defaults[key] = str(value) if value is not None else ""
+        self._metadata_defaults = defaults
 
 
 def run_ui(config: AppConfig) -> None:

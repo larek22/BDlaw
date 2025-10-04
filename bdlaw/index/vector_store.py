@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import asdict
 from typing import List, Sequence
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
 
-from bdlaw.parser.structure import Norm
+from bdlaw.index.payload import NormPayload
 from bdlaw.settings.config import QdrantConfig
 
 
 class VectorStore(ABC):
     @abstractmethod
-    def upsert(self, norms: Sequence[Norm], vectors: Sequence[List[float]]) -> None:  # pragma: no cover
+    def upsert(
+        self, norms: Sequence[NormPayload], vectors: Sequence[List[float]]
+    ) -> None:  # pragma: no cover
         ...
 
     @abstractmethod
@@ -43,8 +44,8 @@ class QdrantVectorStore(VectorStore):
                 vectors_config=rest.VectorParams(size=1536, distance=rest.Distance.COSINE),
             )
 
-    def upsert(self, norms: Sequence[Norm], vectors: Sequence[List[float]]) -> None:
-        payloads = [asdict(norm) for norm in norms]
+    def upsert(self, norms: Sequence[NormPayload], vectors: Sequence[List[float]]) -> None:
+        payloads = [norm.model_dump() for norm in norms]
         points = [
             rest.PointStruct(id=norm.gid, vector=vector, payload=payload)
             for norm, vector, payload in zip(norms, vectors, payloads)

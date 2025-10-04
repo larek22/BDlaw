@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Dict, Optional
 
 from PySide6 import QtWidgets
@@ -56,14 +57,20 @@ class MetadataDialog(QtWidgets.QDialog):
     def get_context(self) -> ParsingContext:
         """Return :class:`ParsingContext` based on current inputs."""
 
+        def parse_date(value: str) -> date:
+            return date.fromisoformat(value)
+
+        valid_from_raw = self._value("valid_from")
+        valid_to_raw = self._value("valid_to") or None
+
         return ParsingContext(
             jurisdiction=self._value("jurisdiction") or "ru",
             act_type=self._value("act_type") or "federal_law",
             law_code=self._value("law_code"),
             law_full_title=self._value("law_full_title"),
             version_id=self._value("version_id"),
-            valid_from=self._value("valid_from"),
-            valid_to=self._value("valid_to") or None,
+            valid_from=parse_date(valid_from_raw),
+            valid_to=parse_date(valid_to_raw) if valid_to_raw else None,
             supersedes=self._value("supersedes") or None,
             source_url=self._value("source_url") or None,
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from datetime import date
 from typing import List
 
 from bdlaw.app.pipeline import ApplicationPipelines
@@ -17,14 +18,17 @@ from bdlaw.utils.logging import configure_logging
 
 
 def build_context(args: argparse.Namespace) -> ParsingContext:
+    valid_from = date.fromisoformat(args.valid_from)
+    valid_to = date.fromisoformat(args.valid_to) if args.valid_to else None
+
     return ParsingContext(
         jurisdiction=args.jurisdiction,
         act_type=args.act_type,
         law_code=args.law_code,
         law_full_title=args.law_full_title,
         version_id=args.version_id,
-        valid_from=args.valid_from,
-        valid_to=args.valid_to,
+        valid_from=valid_from,
+        valid_to=valid_to,
         supersedes=args.supersedes,
         source_url=args.source_url,
     )

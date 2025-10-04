@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from typing import Iterable, List
 
 from bdlaw.index.embedder import Embedder
+from bdlaw.index.payload import NormPayload
 from bdlaw.index.vector_store import VectorStore
-from bdlaw.parser.structure import Norm
 from bdlaw.settings.config import ChunkingConfig
 
 
@@ -22,12 +22,18 @@ class IndexingPipeline:
         self.store = store
         self.chunking = chunking
 
-    def index(self, norms: Iterable[Norm]) -> IndexingStats:
-        norm_list = list(norms)
-        texts: List[str] = [norm.clean_text or norm.raw_text for norm in norm_list]
+    def index(self, norms: Iterable[NormPayload]) -> IndexingStats:
+        unique: List[NormPayload] = []
+        seen_hashes: set[str] = set()
+        for norm in norms:
+            if norm.hash in seen_hashes:
+                continue
+            seen_hashes.add(norm.hash)
+            unique.append(norm)
+        texts: List[str] = [norm.clean_text or norm.raw_text for norm in unique]
         vectors = self.embedder.embed_batch(texts)
-        self.store.upsert(norm_list, vectors)
-        return IndexingStats(norms_indexed=len(norm_list))
+        self.store.upsert(unique, vectors)
+        return IndexingStats(norms_indexed=len(unique))
 
 
 __all__ = ["IndexingPipeline", "IndexingStats"]
