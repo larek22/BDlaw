@@ -1,0 +1,18 @@
+ocr:
+  languages: ["rus", "eng"]
+chunking:
+  max_words: 750
+  overlap_words: 80
+embedding:
+  model: "text-embedding-3-small"
+  batch_size: 128
+qdrant:
+  host: "localhost"
+  port: 6333
+  collection: "laws"
+  prefer_grpc: false
+llm:
+  answer_model: "gpt-4.1-mini"
+  judge_model: "gpt-4.1-mini"
+locale: "ru"
+theme: "dark"
