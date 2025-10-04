@@ -11,6 +11,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from bdlaw.app.ui.controller import AppController
 from bdlaw.app.ui.dialogs import MetadataDialog
+from bdlaw.app.ui.theme import apply_dark_theme
 from bdlaw.parser.structure import ParsingContext
 from bdlaw.search.service import SearchResult
 from bdlaw.settings.config import AppConfig
@@ -84,28 +85,74 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_home(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
+        layout.setSpacing(18)
         layout.addStretch()
-        for label, callback in [
-            ("Импорт и индексация", self._show_import),
-            ("Поиск", self._show_search),
-            ("Тесты", self._show_tests),
-            ("Настройки", self._show_settings),
+
+        title = QtWidgets.QLabel("BDlaw")
+        title.setObjectName("PageTitle")
+        title.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addWidget(title)
+
+        subtitle = QtWidgets.QLabel(
+            "Импортируйте нормативные документы, индекси​руйте нормы и получайте"
+            " точные ответы с цитатами за несколько кликов."
+        )
+        subtitle.setAlignment(QtCore.Qt.AlignCenter)
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.setSpacing(14)
+        for label, callback, icon in [
+            ("Импорт", self._show_import, QtGui.QStyle.SP_DialogOpenButton),
+            ("Индекс", self._show_index, QtGui.QStyle.SP_BrowserReload),
+            ("Поиск", self._show_search, QtGui.QStyle.SP_FileDialogContentsView),
+            ("Тесты", self._show_tests, QtGui.QStyle.SP_ComputerIcon),
+            ("Настройки", self._show_settings, QtGui.QStyle.SP_FileDialogDetailedView),
         ]:
             button = QtWidgets.QPushButton(label)
-            button.setFixedHeight(70)
+            button.setIcon(self.style().standardIcon(icon))
+            button.setMinimumHeight(58)
             button.clicked.connect(callback)
-            layout.addWidget(button)
+            button_row.addWidget(button)
+        layout.addLayout(button_row)
+
+        helper = QtWidgets.QLabel(
+            "Совет: перетащите файлы в окно импорта или воспользуйтесь готовым"
+            " набором образцов в разделе 'Тесты'."
+        )
+        helper.setAlignment(QtCore.Qt.AlignCenter)
+        helper.setWordWrap(True)
+        helper.setStyleSheet("color: #b4b8bd;")
+        layout.addWidget(helper)
+
         layout.addStretch()
         return widget
 
     def _build_import(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
+        layout.setSpacing(14)
+
+        title = QtWidgets.QLabel("Импорт и подготовка")
+        title.setObjectName("PageTitle")
+        layout.addWidget(title)
+
         info = QtWidgets.QLabel("Выберите файлы или перетащите их в окно для подготовки индекса")
         info.setWordWrap(True)
         layout.addWidget(info)
+
+        drop_hint = QtWidgets.QLabel(
+            "Поддерживаются PDF, DOCX, RTF, ODT, HTML, TXT и сканы (через OCR)."
+        )
+        drop_hint.setStyleSheet("color: #b4b8bd;")
+        drop_hint.setWordWrap(True)
+        layout.addWidget(drop_hint)
+
         self.import_list = QtWidgets.QListWidget()
         self.import_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.import_list.setAlternatingRowColors(True)
+        self.import_list.setMinimumHeight(260)
         layout.addWidget(self.import_list)
         layout.addStretch()
         return widget
@@ -113,6 +160,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_index(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
+        layout.setSpacing(14)
+
+        title = QtWidgets.QLabel("Индексация")
+        title.setObjectName("PageTitle")
+        layout.addWidget(title)
+
+        caption = QtWidgets.QLabel(
+            "Прогресс создания векторной базы. Статистика и предупреждения появятся ниже."
+        )
+        caption.setStyleSheet("color: #b4b8bd;")
+        caption.setWordWrap(True)
+        layout.addWidget(caption)
+
         self.index_progress = QtWidgets.QProgressBar()
         self.index_progress.setRange(0, 1)
         self.index_progress.setValue(0)
@@ -125,6 +185,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_search(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
+        layout.setSpacing(14)
+
+        title = QtWidgets.QLabel("Поиск и ответы")
+        title.setObjectName("PageTitle")
+        layout.addWidget(title)
 
         form = QtWidgets.QFormLayout()
         self.search_query = QtWidgets.QLineEdit()
@@ -159,6 +224,7 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.search_results = QtWidgets.QListWidget()
         self.search_results.itemSelectionChanged.connect(self._update_selected_result)
+        self.search_results.setAlternatingRowColors(True)
         splitter.addWidget(self.search_results)
 
         right_panel = QtWidgets.QWidget()
@@ -182,6 +248,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_tests(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
+        layout.setSpacing(14)
+
+        title = QtWidgets.QLabel("Тесты качества")
+        title.setObjectName("PageTitle")
+        layout.addWidget(title)
+
+        info = QtWidgets.QLabel(
+            "Запустите golden-set для оценки извлечения и ответа. Отчёт можно экспортировать."
+        )
+        info.setStyleSheet("color: #b4b8bd;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
         self.tests_log = QtWidgets.QPlainTextEdit()
         self.tests_log.setReadOnly(True)
         layout.addWidget(self.tests_log)
@@ -331,6 +409,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def run_ui(config: AppConfig) -> None:
     app = QtWidgets.QApplication([])
+    apply_dark_theme(app)
     controller = AppController(config)
     window = MainWindow(config, controller)
     window.show()
