@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from bdlaw.index.payload import NormPayload
+from bdlaw.index.schema import NormPayload
 
 
 def export_norms_to_jsonl(norms: Iterable[NormPayload], path: Path) -> None:

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import Dict, List
+
+import re
 
 from openai import OpenAI
 
@@ -34,7 +36,13 @@ class Answerer:
         self.model = model
 
     def answer(self, question: str, chunks: List[AnswerChunk]) -> Answer:
-        context_lines = [f"[{chunk.citation}]\n{chunk.clean_text}\nИсточник: {chunk.source_url}" for chunk in chunks]
+        unique_chunks: Dict[str, AnswerChunk] = {}
+        for chunk in chunks:
+            unique_chunks.setdefault(chunk.citation, chunk)
+        context_lines = [
+            f"[{chunk.citation}]\n{chunk.clean_text}\nИсточник: {chunk.source_url}"
+            for chunk in unique_chunks.values()
+        ]
         context = "\n\n".join(context_lines)
         response = self.client.responses.create(
             model=self.model,
@@ -44,8 +52,22 @@ class Answerer:
             ],
         )
         message = response.output[0].content[0].text  # type: ignore[index]
-        citations = [chunk.citation for chunk in chunks]
-        return Answer(summary=message.strip(), citations=citations)
+        summary = message.strip()
+        _validate_answer_format(summary)
+        citations = [chunk.citation for chunk in unique_chunks.values()]
+        return Answer(summary=summary, citations=citations)
+
+
+FORMAT_RE = re.compile(r"^\[[^\]]+\]\s+—\s+.+?Источник:\s+\S+", re.MULTILINE)
+
+
+def _validate_answer_format(answer: str) -> None:
+    lines = [line.strip() for line in answer.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("LLM ответ пуст")
+    for line in lines:
+        if not FORMAT_RE.match(line):
+            raise ValueError("Ответ не соответствует обязательному формату цитирования")
 
 
 __all__ = ["Answer", "AnswerChunk", "Answerer"]

@@ -16,9 +16,10 @@ from bdlaw.ingest.ocr import OCRImporter
 from bdlaw.ingest.pdf import PDFImporter
 from bdlaw.ingest.rtf import RTFImporter
 from bdlaw.ingest.text import TextImporter
-from bdlaw.index.payload import NormPayload
+from bdlaw.index.schema import NormPayload
+from bdlaw.normalize import TextNormalizer
 from bdlaw.parser.chunker import chunk_norms
-from bdlaw.parser.normalize import normalize_document
+from bdlaw.parser.model import DocumentStructure
 from bdlaw.parser.structure import ParsedDocument, ParsingContext, parse_document
 from bdlaw.search.service import SearchService
 from bdlaw.settings.config import AppConfig
@@ -45,6 +46,7 @@ class ApplicationPipelines:
 
     def __init__(self, config: AppConfig):
         self.config = config
+        self.normalizer = TextNormalizer(replace_yo=config.normalization.replace_yo)
         self.import_pipeline = ImportPipeline(
             importers=[
                 PDFImporter(),
@@ -54,7 +56,7 @@ class ApplicationPipelines:
                 TextImporter(),
                 OCRImporter(config.ocr),
             ],
-            normalizers=[normalize_document],
+            normalizers=[self.normalizer],
         )
         embedder = OpenAIEmbedder(config.embedding)
         store = QdrantVectorStore(config.qdrant)
@@ -70,6 +72,7 @@ class ApplicationPipelines:
 
         documents: List[Document] = []
         norms = []
+        structures: List[DocumentStructure] = []
         resolved_paths = list(discover_documents(paths))
         for idx, path in enumerate(resolved_paths, start=1):
             if progress:
@@ -79,11 +82,18 @@ class ApplicationPipelines:
             if progress:
                 progress(f"Парсинг: {path.name}")
             parsed = parse_document(document, context)
+            structures.append(parsed.structure)
             chunked = chunk_norms(parsed.norms, self.config.chunking)
             norms.extend(chunked)
             if progress:
                 progress(f"Получено норм: {len(chunked)}")
-        parsed_document = ParsedDocument(norms=norms)
+        combined_structure = DocumentStructure()
+        for structure in structures:
+            combined_structure.divisions.extend(structure.divisions)
+            combined_structure.chapters.extend(structure.chapters)
+            combined_structure.sections.extend(structure.sections)
+            combined_structure.articles.extend(structure.articles)
+        parsed_document = ParsedDocument(norms=norms, structure=combined_structure)
         return IngestionResult(documents=documents, parsed=parsed_document)
 
     def index_parsed(

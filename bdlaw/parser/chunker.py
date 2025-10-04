@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Iterable, List
 
-from bdlaw.index.payload import NormPayload
+from bdlaw.index.schema import NormPayload
 from bdlaw.settings.config import ChunkingConfig
 
 

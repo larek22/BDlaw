@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import List
 
@@ -25,6 +26,12 @@ class AnswerValidator:
         self.model = model
 
     def validate(self, answer: str, citations: List[str], context_citations: List[str]) -> ValidationResult:
+        missing = [citation for citation in citations if not _soft_match(citation, context_citations)]
+        if missing:
+            return ValidationResult(
+                verdict="FAIL",
+                explanation=f"Цитаты отсутствуют в retrieved нормам: {', '.join(missing)}",
+            )
         input_payload = [
             {"role": "system", "content": VALIDATOR_PROMPT},
             {
@@ -43,6 +50,15 @@ class AnswerValidator:
         content = response.output[0].content[0].text  # type: ignore[index]
         verdict = "PASS" if "PASS" in content.upper() else "FAIL"
         return ValidationResult(verdict=verdict, explanation=content.strip())
+
+
+def _soft_match(citation: str, candidates: List[str]) -> bool:
+    normalized = _normalize_citation(citation)
+    return any(normalized in _normalize_citation(candidate) for candidate in candidates)
+
+
+def _normalize_citation(citation: str) -> str:
+    return re.sub(r"\s+", "", citation.lower())
 
 
 __all__ = ["AnswerValidator", "ValidationResult"]

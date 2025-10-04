@@ -1,7 +1,7 @@
 from datetime import date
 from pathlib import Path
 
-from bdlaw.index.payload import compute_norm_hash
+from bdlaw.index.ids import make_hash
 from bdlaw.ingest.base import Document
 from bdlaw.parser.structure import ParsingContext, parse_document
 
@@ -58,6 +58,7 @@ def test_semicolon_lists_split_into_subpoints():
     subpoints = [norm for norm in parsed.norms[1:]]
     assert {norm.subpoint for norm in subpoints} == {"1", "2", "3"}
     assert all(norm.point == "1" for norm in subpoints)
+    assert parsed.structure.articles
 
 
 def test_amendments_annotations_and_cross_refs_extracted():
@@ -70,7 +71,7 @@ def test_amendments_annotations_and_cross_refs_extracted():
     assert norm.amendments == [{"date": "2012-12-30", "law_no": "302-ФЗ", "scope": "article"}]
     assert norm.annotations[0]["type"] == "cc_ruling"
     assert norm.cross_refs[0]["article"] == "12"
-    assert norm.hash == compute_norm_hash(norm.clean_text)
+    assert norm.hash == make_hash(norm.clean_text)
 
 
 def test_citation_format_includes_version():

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Iterable, List
 
 from bdlaw.index.embedder import Embedder
-from bdlaw.index.payload import NormPayload
+from bdlaw.index.schema import NormPayload
 from bdlaw.index.vector_store import VectorStore
 from bdlaw.settings.config import ChunkingConfig
 

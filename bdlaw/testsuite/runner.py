@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from math import log2
 from pathlib import Path
 from statistics import mean
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
 
 from bdlaw.search.service import SearchService, SearchResult
 
@@ -23,17 +24,27 @@ class MetricReport:
     recall_at_k: float
     precision_at_k: float
     mrr_at_k: float
+    ndcg_at_k: float
+    answer_pass_at_k: float
 
 
 class TestSuiteRunner:
-    def __init__(self, search: SearchService, k: int = 5):
+    def __init__(
+        self,
+        search: SearchService,
+        k: int = 5,
+        answer_validator: Optional[object] = None,
+    ):
         self.search = search
         self.k = k
+        self.answer_validator = answer_validator
 
     def run(self, suite: Sequence[GoldenQuery]) -> MetricReport:
         recalls: List[float] = []
         precisions: List[float] = []
         reciprocal_ranks: List[float] = []
+        ndcgs: List[float] = []
+        passes: List[float] = []
         for golden in suite:
             results = self.search.search(
                 query=golden.query,
@@ -44,10 +55,14 @@ class TestSuiteRunner:
             recalls.append(self._recall(golden, results))
             precisions.append(self._precision(golden, results))
             reciprocal_ranks.append(self._mrr(golden, results))
+            ndcgs.append(self._ndcg(golden, results))
+            passes.append(self._answer_pass(golden, results))
         return MetricReport(
             recall_at_k=mean(recalls) if recalls else 0.0,
             precision_at_k=mean(precisions) if precisions else 0.0,
             mrr_at_k=mean(reciprocal_ranks) if reciprocal_ranks else 0.0,
+            ndcg_at_k=mean(ndcgs) if ndcgs else 0.0,
+            answer_pass_at_k=mean(passes) if passes else 0.0,
         )
 
     @staticmethod
@@ -83,6 +98,47 @@ class TestSuiteRunner:
             if (article, part) in expected:
                 return 1.0 / idx
         return 0.0
+
+    def _ndcg(self, golden: GoldenQuery, results: Sequence[SearchResult]) -> float:
+        if not golden.expected_norms:
+            return 1.0
+        relevance = [self._relevance(result, golden.expected_norms) for result in results]
+        dcg = sum((rel / log2(idx + 2)) for idx, rel in enumerate(relevance))
+        ideal = sorted(relevance, reverse=True)
+        idcg = sum((rel / log2(idx + 2)) for idx, rel in enumerate(ideal))
+        return dcg / idcg if idcg else 0.0
+
+    def _answer_pass(self, golden: GoldenQuery, results: Sequence[SearchResult]) -> float:
+        if not self.answer_validator or not results:
+            return 0.0
+        answer = self._build_answer(results)
+        citations = [res.payload.get("citation", "") for res in results if res.payload.get("citation")]
+        validation = self.answer_validator.validate(
+            answer,
+            citations,
+            [f"{norm.get('law_code', '')} ст.{norm.get('article')}" for norm in golden.expected_norms],
+        )
+        return 1.0 if validation.verdict.upper() == "PASS" else 0.0
+
+    def _relevance(self, result: SearchResult, expected: Iterable[Dict[str, str]]) -> float:
+        for norm in expected:
+            if (
+                result.payload.get("law_code") == norm.get("law_code")
+                and result.payload.get("article") == norm.get("article")
+                and result.payload.get("part") == norm.get("part")
+            ):
+                return 1.0
+        return 0.0
+
+    @staticmethod
+    def _build_answer(results: Sequence[SearchResult]) -> str:
+        lines = []
+        for result in results:
+            citation = result.payload.get("citation")
+            url = result.payload.get("source_url", "")
+            if citation and url:
+                lines.append(f"[{citation}] — Автоматическая проверка. Источник: {url}")
+        return "\n".join(lines) if lines else "Недостаточно данных"
 
     @staticmethod
     def _match_norms(golden: GoldenQuery, results: Sequence[SearchResult]) -> List[SearchResult]:

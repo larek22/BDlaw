@@ -8,7 +8,7 @@ from typing import List, Sequence
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
 
-from bdlaw.index.payload import NormPayload
+from bdlaw.index.schema import NormPayload
 from bdlaw.settings.config import QdrantConfig
 
 
@@ -43,6 +43,26 @@ class QdrantVectorStore(VectorStore):
                 collection_name=self.collection,
                 vectors_config=rest.VectorParams(size=1536, distance=rest.Distance.COSINE),
             )
+        indexed_fields = [
+            "jurisdiction",
+            "law_code",
+            "article",
+            "part",
+            "point",
+            "subpoint",
+            "version_id",
+            "valid_from",
+            "valid_to",
+        ]
+        for field in indexed_fields:
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection,
+                    field_name=field,
+                    field_schema=rest.PayloadSchemaType.KEYWORD,
+                )
+            except Exception:  # pragma: no cover - index already exists or server error handled elsewhere
+                continue
 
     def upsert(self, norms: Sequence[NormPayload], vectors: Sequence[List[float]]) -> None:
         payloads = [norm.model_dump() for norm in norms]

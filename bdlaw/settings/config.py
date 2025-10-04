@@ -25,6 +25,11 @@ class ChunkingConfig:
 
 
 @dataclass
+class NormalizationConfig:
+    replace_yo: bool = False
+
+
+@dataclass
 class EmbeddingConfig:
     model: str = "text-embedding-3-small"
     batch_size: int = 128
@@ -47,6 +52,7 @@ class LLMConfig:
 @dataclass
 class AppConfig:
     ocr: OCRConfig = field(default_factory=OCRConfig)
+    normalization: NormalizationConfig = field(default_factory=NormalizationConfig)
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     qdrant: QdrantConfig = field(default_factory=QdrantConfig)
@@ -63,6 +69,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return AppConfig(
         ocr=OCRConfig(**data.get("ocr", {})),
+        normalization=NormalizationConfig(**data.get("normalization", {})),
         chunking=ChunkingConfig(**data.get("chunking", {})),
         embedding=EmbeddingConfig(**data.get("embedding", {})),
         qdrant=QdrantConfig(**data.get("qdrant", {})),
@@ -77,6 +84,7 @@ __all__ = [
     "ChunkingConfig",
     "EmbeddingConfig",
     "LLMConfig",
+    "NormalizationConfig",
     "OCRConfig",
     "QdrantConfig",
     "load_config",

@@ -1,5 +1,8 @@
 ocr:
   languages: ["rus", "eng"]
+  tesseract_path: null
+normalization:
+  replace_yo: false
 chunking:
   max_words: 750
   overlap_words: 80
