@@ -53,8 +53,31 @@ def main(argv: list[str] | None = None) -> None:
 
     _ensure_qdrant(not args.no_compose)
 
-    from bdlaw.settings.config import load_config
-    from bdlaw.app.ui import run_ui
+    try:
+        from bdlaw.settings.config import load_config
+    except ModuleNotFoundError as exc:
+        missing = exc.name or ""
+        if missing == "bdlaw":
+            raise
+        print(
+            "Не удалось импортировать зависимости приложения. "
+            "Убедитесь, что виртуальное окружение активировано и выполнена команда"
+            " 'pip install -e .[ui]'.\n"
+            f"Отсутствующий пакет: {missing or exc}"
+        )
+        return
+
+    try:
+        from bdlaw.app.ui import run_ui
+    except ModuleNotFoundError as exc:
+        missing = exc.name or "PySide6"
+        print(
+            "Не удалось запустить графический интерфейс: отсутствует зависимость"
+            f" '{missing}'.\n"
+            "Установите её командой 'pip install PySide6' (или активируйте окружение,"
+            " где библиотека уже установлена) и повторите запуск."
+        )
+        return
 
     config = load_config()
     run_ui(config)
