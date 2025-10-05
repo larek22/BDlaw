@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bdlaw"
+version = "0.1.0"
+description = "Desktop toolkit for legal document ingestion and RAG search"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "BDlaw Team"}]
+dependencies = [
+    "PySide6",
+    "pymupdf",
+    "pdfminer.six",
+    "python-docx",
+    "pypandoc",
+    "beautifulsoup4",
+    "readability-lxml",
+    "pytesseract",
+    "pillow",
+    "spacy",
+    "regex",
+    "openai>=1.0.0",
+    "qdrant-client",
+    "keyring",
+    "pydantic",
+    "tiktoken",
+    "rich",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+bdlaw = "bdlaw.cli:main"
