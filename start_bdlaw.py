@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -10,24 +11,35 @@ from pathlib import Path
 
 def _ensure_qdrant(compose: bool) -> None:
     if not compose:
+        print("Автозапуск Qdrant отключён (--no-compose). Предполагается, что сервис уже запущен.")
         return
 
     compose_file = Path(__file__).with_name("docker-compose.yml")
     if not compose_file.exists():
-        raise SystemExit("docker-compose.yml не найден — убедитесь, что запускаете из корня проекта")
+        print("docker-compose.yml не найден. Пропускаем автозапуск Qdrant.")
+        return
+
+    docker_bin = shutil.which("docker")
+    if docker_bin is None:
+        print("Docker не найден в PATH. Пропускаем автозапуск Qdrant. Запустите Qdrant вручную.")
+        return
 
     try:
         subprocess.run(
-            ["docker", "compose", "up", "-d", "qdrant"],
+            [docker_bin, "compose", "up", "-d", "qdrant"],
             check=True,
             cwd=compose_file.parent,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-    except FileNotFoundError as exc:  # pragma: no cover - depends on docker availability
-        raise SystemExit("Не удалось найти Docker. Установите Docker Desktop или запустите Qdrant вручную") from exc
+        print("Qdrant запущен через docker compose.")
     except subprocess.CalledProcessError as exc:  # pragma: no cover - external command
-        raise SystemExit(f"Запуск Qdrant через docker compose завершился с ошибкой:\n{exc.stderr.decode()}" ) from exc
+        stderr = exc.stderr.decode(errors="ignore")
+        print(
+            "Не удалось автоматически запустить Qdrant через docker compose. "
+            "Запустите сервис вручную и повторите попытку.\n"
+            f"Сообщение docker: {stderr.strip()}"
+        )
 
 
 def main(argv: list[str] | None = None) -> None:
