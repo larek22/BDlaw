@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -146,7 +146,7 @@ class NormPayload(BaseModel):
             span_offsets=span_offsets,
             hash=make_hash(clean_text),
             tokens_est=tokens_est,
-            ingested_at=ingested_at or datetime.now(UTC),
+            ingested_at=ingested_at or datetime.now(timezone.utc),
             file_origin=file_origin,
         )
 
