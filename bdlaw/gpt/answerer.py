@@ -32,10 +32,22 @@ class Answer:
 
 class Answerer:
     def __init__(self, model: str):
-        self.client = OpenAI()
         self.model = model
+        self._client: OpenAI | None = None
+
+    def _get_client(self) -> OpenAI:
+        if self._client is None:
+            try:
+                self._client = OpenAI()
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    "Не удалось подключиться к OpenAI. Убедитесь, что установлен пакет 'openai' "
+                    "и задан API-ключ (OPENAI_API_KEY или запись в keyring)."
+                ) from exc
+        return self._client
 
     def answer(self, question: str, chunks: List[AnswerChunk]) -> Answer:
+        client = self._get_client()
         unique_chunks: Dict[str, AnswerChunk] = {}
         for chunk in chunks:
             unique_chunks.setdefault(chunk.citation, chunk)
@@ -44,7 +56,7 @@ class Answerer:
             for chunk in unique_chunks.values()
         ]
         context = "\n\n".join(context_lines)
-        response = self.client.responses.create(
+        response = client.responses.create(
             model=self.model,
             input=[
                 {"role": "system", "content": SYSTEM_PROMPT},

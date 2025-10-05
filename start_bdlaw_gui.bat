@@ -9,3 +9,8 @@ if exist .venv\Scripts\python.exe (
 )
 
 "%PYTHON_EXE%" start_bdlaw.py --no-compose %*
+if errorlevel 1 (
+    echo.
+    echo Возникла ошибка при запуске BDlaw. Проверьте сообщения выше.
+    pause
+)

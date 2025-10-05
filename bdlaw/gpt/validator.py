@@ -22,8 +22,19 @@ class ValidationResult:
 
 class AnswerValidator:
     def __init__(self, model: str):
-        self.client = OpenAI()
         self.model = model
+        self._client: OpenAI | None = None
+
+    def _get_client(self) -> OpenAI:
+        if self._client is None:
+            try:
+                self._client = OpenAI()
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    "Не удалось инициализировать валидатор OpenAI. Проверьте установку 'openai' "
+                    "и наличие API-ключа (OPENAI_API_KEY или системный keyring)."
+                ) from exc
+        return self._client
 
     def validate(self, answer: str, citations: List[str], context_citations: List[str]) -> ValidationResult:
         missing = [citation for citation in citations if not _soft_match(citation, context_citations)]
@@ -46,7 +57,8 @@ class AnswerValidator:
                 ),
             },
         ]
-        response = self.client.responses.create(model=self.model, input=input_payload)
+        client = self._get_client()
+        response = client.responses.create(model=self.model, input=input_payload)
         content = response.output[0].content[0].text  # type: ignore[index]
         verdict = "PASS" if "PASS" in content.upper() else "FAIL"
         return ValidationResult(verdict=verdict, explanation=content.strip())

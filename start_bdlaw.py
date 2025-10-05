@@ -6,6 +6,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 
@@ -59,28 +60,44 @@ def main(argv: list[str] | None = None) -> None:
         missing = exc.name or ""
         if missing == "bdlaw":
             raise
-        print(
+        _print_error(
             "Не удалось импортировать зависимости приложения. "
             "Убедитесь, что виртуальное окружение активировано и выполнена команда"
             " 'pip install -e .[ui]'.\n"
             f"Отсутствующий пакет: {missing or exc}"
         )
-        return
+        sys.exit(1)
 
     try:
         from bdlaw.app.ui import run_ui
     except ModuleNotFoundError as exc:
         missing = exc.name or "PySide6"
-        print(
+        _print_error(
             "Не удалось запустить графический интерфейс: отсутствует зависимость"
             f" '{missing}'.\n"
             "Установите её командой 'pip install PySide6' (или активируйте окружение,"
             " где библиотека уже установлена) и повторите запуск."
         )
-        return
+        sys.exit(1)
 
-    config = load_config()
-    run_ui(config)
+    try:
+        config = load_config()
+        run_ui(config)
+    except Exception as exc:  # noqa: BLE001 - surface message before closing console
+        _print_error(
+            "Не удалось запустить графический интерфейс. Подробности приведены ниже:\n"
+            f"{exc}\n\n{traceback.format_exc()}"
+        )
+        sys.exit(1)
+
+
+def _print_error(message: str) -> None:
+    print(message)
+    if sys.stdin.isatty():
+        try:
+            input("Нажмите Enter, чтобы закрыть окно…")
+        except EOFError:
+            pass
 
 
 if __name__ == "__main__":  # pragma: no cover - script entrypoint
