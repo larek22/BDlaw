@@ -18,7 +18,7 @@ Vector KB Assistant is a desktop application built with PySide6 that lets you in
 ### Prerequisites
 
 - Python 3.11
-- Access to OpenAI models `text-embedding-3-large` and a chat-capable model. The default is `gpt-4.1-nano`, but you can choose an accessible alternative such as `gpt-4o-mini` from the Settings tab.
+- Access to OpenAI models `text-embedding-3-large` and a chat-capable model. The default is `gpt-4o-mini`, and the app will automatically fall back to it if another configured model is denied.
 - A running Qdrant instance (e.g., via Docker: `docker run -d --name qdrant -p 6333:6333 -v qdrant_storage:/qdrant/storage qdrant/qdrant`).
 
 ### Installation
@@ -51,7 +51,7 @@ The first launch creates a configuration directory at `~/.vector_kb` containing 
 
 ## Troubleshooting
 
-- **OpenAI model access errors**: If you see a permission error when asking a question, select a chat model available to your OpenAI account (for example `gpt-4o-mini`) in the Settings tab and retry.
+- **OpenAI model access errors**: If you see a permission error when asking a question, the app falls back to `gpt-4o-mini`. If that also fails, choose a chat model available to your OpenAI account in the Settings tab and retry.
 
 ## Tests
 

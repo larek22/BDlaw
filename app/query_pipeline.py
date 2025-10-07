@@ -77,17 +77,48 @@ class QueryPipeline:
                 "content": f"Context:\n{context}\n\nQuestion: {question}",
             },
         ]
+        configured_model = self.settings.openai_models.chat or "gpt-4o-mini"
         try:
             response = self._client.chat.completions.create(
-                model=self.settings.openai_models.chat,
+                model=configured_model,
                 messages=messages,
                 temperature=0,
             )
         except PermissionDeniedError as exc:
-            raise RuntimeError(
-                "OpenAI denied access to the configured chat model. "
-                "Please choose a model available to your account in Settings (for example, gpt-4o-mini)."
-            ) from exc
+            fallback_model = "gpt-4o-mini"
+            if configured_model != fallback_model:
+                logger.warning(
+                    "Permission denied for OpenAI model %s; retrying with fallback %s",
+                    configured_model,
+                    fallback_model,
+                )
+                try:
+                    response = self._client.chat.completions.create(
+                        model=fallback_model,
+                        messages=messages,
+                        temperature=0,
+                    )
+                except PermissionDeniedError as fallback_exc:
+                    raise RuntimeError(
+                        "OpenAI denied access to both the configured chat model and fallback gpt-4o-mini. "
+                        "Please choose a model available to your account in the Settings tab."
+                    ) from fallback_exc
+                except OpenAIError as fallback_exc:
+                    raise RuntimeError(
+                        "OpenAI chat completion failed when using fallback model gpt-4o-mini: "
+                        f"{fallback_exc}"
+                    ) from fallback_exc
+                else:
+                    self.settings.openai_models.chat = fallback_model
+                    try:
+                        self.settings.save()
+                    except Exception:
+                        logger.exception("Failed to persist fallback chat model selection")
+            else:
+                raise RuntimeError(
+                    "OpenAI denied access to the configured chat model. "
+                    "Please choose a model available to your account in the Settings tab."
+                ) from exc
         except OpenAIError as exc:
             raise RuntimeError(f"OpenAI chat completion failed: {exc}") from exc
 

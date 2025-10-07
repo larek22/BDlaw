@@ -22,7 +22,7 @@ def _env_default(key: str, default: str | None = None) -> str | None:
 @dataclass
 class ModelSettings:
     embedding: str = "text-embedding-3-large"
-    chat: str = "gpt-4.1-nano"
+    chat: str = "gpt-4o-mini"
 
 
 @dataclass
