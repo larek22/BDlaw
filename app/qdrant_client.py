@@ -18,6 +18,7 @@ class QdrantVectorStore:
         self._client = QdrantClient(
             url=settings.qdrant.url,
             api_key=settings.qdrant.api_key or None,
+            timeout=settings.qdrant.timeout_seconds,
         )
 
     @property
@@ -40,8 +41,8 @@ class QdrantVectorStore:
             )
 
     def upsert_chunks(self, chunks: Iterable[Chunk], vectors: List[List[float]]) -> None:
-        payloads = []
-        points = []
+        batch_size = max(1, self.settings.qdrant.upsert_batch_size)
+        points: List[rest.PointStruct] = []
         for chunk, vector in zip(chunks, vectors):
             payload = {
                 "doc_id": chunk.doc_id,
@@ -52,7 +53,6 @@ class QdrantVectorStore:
                 "sha": chunk.sha,
                 "text": chunk.text,
             }
-            payloads.append(payload)
             points.append(
                 rest.PointStruct(
                     id=f"{chunk.sha}_{chunk.chunk_index}",
@@ -60,9 +60,18 @@ class QdrantVectorStore:
                     payload=payload,
                 )
             )
-        if not points:
-            return
-        self._client.upsert(collection_name=self.collection_name, points=points)
+            if len(points) >= batch_size:
+                self._upsert_batch(points)
+                points = []
+        if points:
+            self._upsert_batch(points)
+
+    def _upsert_batch(self, points: List[rest.PointStruct]) -> None:
+        try:
+            self._client.upsert(collection_name=self.collection_name, points=points)
+        except Exception:
+            logger.exception("Failed to upsert batch with %d points", len(points))
+            raise
 
     def search(self, query_vector: List[float], top_k: int) -> List[rest.ScoredPoint]:
         return self._client.search(

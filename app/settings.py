@@ -30,6 +30,8 @@ class QdrantSettings:
     url: str = "http://localhost:6333"
     api_key: str = ""
     collection: str = "kb_docs_v1"
+    upsert_batch_size: int = 128
+    timeout_seconds: float = 30.0
 
 
 @dataclass
