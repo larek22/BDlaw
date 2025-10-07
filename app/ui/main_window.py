@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Sequence
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -343,6 +343,10 @@ class MainWindow(QMainWindow):
         self.vector_store: QdrantVectorStore | None = None
         self.ingest_service: IngestService | None = None
         self.query_pipeline: QueryPipeline | None = None
+        self._ingest_thread: QThread | None = None
+        self._ingest_worker: IngestWorker | None = None
+        self._query_thread: QThread | None = None
+        self._query_worker: QueryWorker | None = None
 
         self.setWindowTitle("Vector KB Assistant")
         self.resize(900, 700)
@@ -410,57 +414,67 @@ class MainWindow(QMainWindow):
         file_paths = [Path(p) for p in paths]
         self.ingest_tab.set_running(True)
         self.ingest_tab.append_log("Starting ingestion…")
+        self._cleanup_worker("_ingest_thread", "_ingest_worker")
         worker = IngestWorker(self.ingest_service, file_paths, recreate)
-        thread = QThread(self)
+        thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(lambda result: self._ingest_finished(thread, worker, result))
-        worker.error.connect(lambda err: self._ingest_error(thread, worker, err))
+        worker.finished.connect(self._ingest_finished, Qt.QueuedConnection)
+        worker.error.connect(self._ingest_error, Qt.QueuedConnection)
+        self._ingest_thread = thread
+        self._ingest_worker = worker
         thread.start()
 
-    def _ingest_finished(self, thread: QThread, worker: QObject, result: dict) -> None:
+    def _ingest_finished(self, result: dict) -> None:
         self.ingest_tab.append_log(
             f"Ingestion complete: {result['files_processed']} files, {result['chunks_created']} chunks, {result['skipped']} skipped"
         )
         self.ingest_tab.set_running(False)
-        thread.quit()
-        thread.wait()
-        worker.deleteLater()
+        self._cleanup_worker("_ingest_thread", "_ingest_worker")
 
-    def _ingest_error(self, thread: QThread, worker: QObject, error: str) -> None:
+    def _ingest_error(self, error: str) -> None:
         self.ingest_tab.append_log(f"Error: {error}")
         QMessageBox.critical(self, "Ingest", error)
         self.ingest_tab.set_running(False)
-        thread.quit()
-        thread.wait()
-        worker.deleteLater()
+        self._cleanup_worker("_ingest_thread", "_ingest_worker")
 
     def _start_query(self, question: str) -> None:
         if not self.query_pipeline:
             QMessageBox.critical(self, "Ask", "Services not initialized")
             return
         self.query_tab.set_running(True)
+        self._cleanup_worker("_query_thread", "_query_worker")
         worker = QueryWorker(self.query_pipeline, question)
-        thread = QThread(self)
+        thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(lambda result: self._query_finished(thread, worker, result, question))
-        worker.error.connect(lambda err: self._query_error(thread, worker, err))
+        worker.finished.connect(lambda result: self._query_finished(result, question), Qt.QueuedConnection)
+        worker.error.connect(self._query_error, Qt.QueuedConnection)
+        self._query_thread = thread
+        self._query_worker = worker
         thread.start()
 
-    def _query_finished(self, thread: QThread, worker: QObject, result: dict, question: str) -> None:
+    def _query_finished(self, result: dict, question: str) -> None:
         self.query_tab.display_answer(result.get("answer", ""), result.get("sources", []), question)
         self.query_tab.set_running(False)
-        thread.quit()
-        thread.wait()
-        worker.deleteLater()
+        self._cleanup_worker("_query_thread", "_query_worker")
 
-    def _query_error(self, thread: QThread, worker: QObject, error: str) -> None:
+    def _query_error(self, error: str) -> None:
         QMessageBox.critical(self, "Ask", error)
         self.query_tab.set_running(False)
-        thread.quit()
-        thread.wait()
-        worker.deleteLater()
+        self._cleanup_worker("_query_thread", "_query_worker")
+
+    def _cleanup_worker(self, thread_attr: str, worker_attr: str) -> None:
+        thread = getattr(self, thread_attr)
+        worker = getattr(self, worker_attr)
+        if thread:
+            thread.quit()
+            thread.wait()
+            thread.deleteLater()
+        if worker:
+            worker.deleteLater()
+        setattr(self, thread_attr, None)
+        setattr(self, worker_attr, None)
 
 
 def run_app() -> None:  # pragma: no cover

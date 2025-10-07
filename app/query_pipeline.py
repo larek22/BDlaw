@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from typing import List, Sequence
 
-from openai import OpenAI
+from openai import OpenAI, OpenAIError, PermissionDeniedError
 
 from .chunker import Chunk
 from .embeddings import EmbeddingClient
@@ -77,10 +77,19 @@ class QueryPipeline:
                 "content": f"Context:\n{context}\n\nQuestion: {question}",
             },
         ]
-        response = self._client.chat.completions.create(
-            model=self.settings.openai_models.chat,
-            messages=messages,
-            temperature=0,
-        )
+        try:
+            response = self._client.chat.completions.create(
+                model=self.settings.openai_models.chat,
+                messages=messages,
+                temperature=0,
+            )
+        except PermissionDeniedError as exc:
+            raise RuntimeError(
+                "OpenAI denied access to the configured chat model. "
+                "Please choose a model available to your account in Settings (for example, gpt-4o-mini)."
+            ) from exc
+        except OpenAIError as exc:
+            raise RuntimeError(f"OpenAI chat completion failed: {exc}") from exc
+
         answer = response.choices[0].message.content or "I don't know."
         return QueryResponse(answer=answer.strip(), sources=sources)
