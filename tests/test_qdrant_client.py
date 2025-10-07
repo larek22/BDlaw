@@ -5,7 +5,7 @@ import pytest
 pytest.importorskip("qdrant_client")
 
 from app.chunker import Chunk
-from app.qdrant_client import _make_point_id
+from app.qdrant_client import _make_point_id, _vector_size_for_model, _mask_api_key
 
 
 def test_make_point_id_returns_deterministic_uuid():
@@ -39,3 +39,15 @@ def test_make_point_id_returns_deterministic_uuid():
         sha="a" * 64,
     )
     assert _make_point_id(different) != point_id
+
+
+def test_vector_size_for_model_defaults():
+    assert _vector_size_for_model("text-embedding-3-large") == 3072
+    assert _vector_size_for_model("anything-else") == 1536
+
+
+def test_mask_api_key():
+    assert _mask_api_key(None) == "<none>"
+    assert _mask_api_key("") == "<none>"
+    assert _mask_api_key("abcd") == "***"
+    assert _mask_api_key("abcdefgh") == "ab…gh"

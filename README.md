@@ -46,6 +46,7 @@ The first launch creates a configuration directory at `~/.vector_kb` containing 
 ## Usage
 
 1. Open the **Settings** tab to review model names, Qdrant settings, and chunking parameters. Save any changes and optionally run the OpenAI/Qdrant tests.
+   * When targeting **Qdrant Cloud**, set the Qdrant URL to the HTTPS endpoint (for example, `https://<cluster-id>.cloud.qdrant.io`) and paste the API key provided by Qdrant. The app will require the key for HTTPS endpoints and automatically log which host is used.
 2. Switch to the **Ingest** tab, add documents, choose whether to rebuild the collection, and click **Create Vector DB**. Progress appears in the log pane.
 3. After ingestion, go to the **Ask** tab, enter a question, and click **Search & Answer**. Answers include citations, and sources display highlighted query terms.
 
@@ -64,6 +65,16 @@ pytest
 ## Logging
 
 Application logs are written to `~/.vector_kb/app.log` and streamed into the GUI log view during ingestion and queries.
+
+## Qdrant connectivity check
+
+To quickly verify the configured Qdrant endpoint and collection state outside of the GUI, run:
+
+```bash
+python debug_qdrant.py
+```
+
+The helper prints the available collections and the current point count for the configured collection, making it easy to confirm that cloud ingestions succeeded.
 
 ## License
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
@@ -16,30 +16,92 @@ logger = logging.getLogger(__name__)
 class QdrantVectorStore:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
-        self._client = QdrantClient(
-            url=settings.qdrant.url,
-            api_key=settings.qdrant.api_key or None,
-            timeout=settings.qdrant.timeout_seconds,
+        url = (settings.qdrant.url or "").strip()
+        api_key = (settings.qdrant.api_key or "").strip()
+
+        if not url:
+            raise ValueError("Qdrant URL must be configured")
+
+        client_kwargs: dict[str, object] = {
+            "url": url,
+            "timeout": settings.qdrant.timeout_seconds,
+        }
+
+        if url.startswith("https://"):
+            if not api_key:
+                raise ValueError("Qdrant API key is required for HTTPS endpoints")
+            client_kwargs["api_key"] = api_key
+        elif url.startswith("http://"):
+            if "localhost" not in url and "127.0.0.1" not in url and api_key:
+                client_kwargs["api_key"] = api_key
+        else:
+            raise ValueError(f"Unsupported Qdrant URL: {url}")
+
+        logger.info(
+            "Using Qdrant endpoint: %s (api_key=%s)",
+            url,
+            _mask_api_key(client_kwargs.get("api_key")),
         )
+
+        self._client = QdrantClient(**client_kwargs)
 
     @property
     def collection_name(self) -> str:
         return self.settings.qdrant.collection
 
-    def ensure_collection(self, vector_size: int, recreate: bool = False) -> None:
+    def ensure_collection(self, embedding_model: str, recreate: bool = False) -> None:
         collection = self.collection_name
+        vector_size = _vector_size_for_model(embedding_model)
+        vectors_config = rest.VectorParams(size=vector_size, distance=rest.Distance.COSINE)
+
         if recreate:
-            try:
-                self._client.delete_collection(collection)
-            except Exception:
-                logger.debug("Collection %s did not exist before recreation", collection)
-        collections = {info.name for info in self._client.get_collections().collections}
-        if collection not in collections:
-            logger.info("Creating collection %s", collection)
-            self._client.create_collection(
-                collection_name=collection,
-                vectors_config=rest.VectorParams(size=vector_size, distance=rest.Distance.COSINE),
+            logger.info(
+                "Recreating collection %s with dimension %d", collection, vector_size
             )
+            self._client.recreate_collection(
+                collection_name=collection, vectors_config=vectors_config
+            )
+            return
+
+        try:
+            info = self._client.get_collection(collection_name=collection)
+        except Exception:
+            info = None
+
+        current_size: Optional[int] = None
+        if info and getattr(info, "config", None):
+            params = getattr(info.config, "params", None)
+            vectors = getattr(params, "vectors", None)
+            if hasattr(vectors, "size"):
+                current_size = getattr(vectors, "size")
+            elif isinstance(vectors, dict):
+                size = vectors.get("size")
+                if isinstance(size, int):
+                    current_size = size
+
+        if current_size == vector_size:
+            logger.info(
+                "Collection %s already matches dimension %d", collection, vector_size
+            )
+            return
+
+        if current_size is not None and current_size != vector_size:
+            logger.warning(
+                "Collection %s dimension %s differs from %s; recreating",
+                collection,
+                current_size,
+                vector_size,
+            )
+        else:
+            logger.info(
+                "Collection %s missing; creating with dimension %d",
+                collection,
+                vector_size,
+            )
+
+        self._client.recreate_collection(
+            collection_name=collection, vectors_config=vectors_config
+        )
 
     def upsert_chunks(self, chunks: Iterable[Chunk], vectors: List[List[float]]) -> None:
         batch_size = max(1, self.settings.qdrant.upsert_batch_size)
@@ -74,6 +136,16 @@ class QdrantVectorStore:
             logger.exception("Failed to upsert batch with %d points", len(points))
             raise
 
+    def count_points(self) -> int:
+        try:
+            response = self._client.count(
+                collection_name=self.collection_name, exact=True
+            )
+        except Exception:
+            logger.exception("Failed to count points for collection %s", self.collection_name)
+            raise
+        return int(getattr(response, "count", 0))
+
     def search(self, query_vector: List[float], top_k: int) -> List[rest.ScoredPoint]:
         return self._client.search(
             collection_name=self.collection_name,
@@ -95,3 +167,17 @@ def _make_point_id(chunk: Chunk) -> str:
 
     source = f"{chunk.sha}:{chunk.chunk_index}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, source))
+
+
+def _vector_size_for_model(model: str) -> int:
+    if model == "text-embedding-3-large":
+        return 3072
+    return 1536
+
+
+def _mask_api_key(key: Optional[str]) -> str:
+    if not key:
+        return "<none>"
+    if len(key) <= 4:
+        return "***"
+    return f"{key[:2]}…{key[-2:]}"

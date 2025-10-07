@@ -61,7 +61,8 @@ class IngestService:
         if not all_chunks:
             return IngestStats(files_processed=0, chunks_created=0, skipped=skipped)
 
-        self.vector_store.ensure_collection(vector_size=3072, recreate=recreate)
+        embedding_model = self.settings.openai_models.embedding
+        self.vector_store.ensure_collection(embedding_model=embedding_model, recreate=recreate)
 
         texts = [chunk.text for chunk in all_chunks]
         shas = [chunk.sha for chunk in all_chunks]
@@ -69,7 +70,26 @@ class IngestService:
 
         sha_to_vector = {result.sha: result.vector for result in embeddings}
         vectors = [sha_to_vector[chunk.sha] for chunk in all_chunks]
-        self.vector_store.upsert_chunks(all_chunks, vectors)
+        vector_dim = len(vectors[0]) if vectors else 0
+        logger.info(
+            "[UPSERT] collection=%s points=%d dim=%d",
+            self.vector_store.collection_name,
+            len(vectors),
+            vector_dim,
+        )
+
+        try:
+            self.vector_store.upsert_chunks(all_chunks, vectors)
+        except Exception:
+            logger.exception("Failed to upsert vectors to Qdrant")
+            raise
+
+        try:
+            total_points = self.vector_store.count_points()
+        except Exception:
+            logger.warning("Unable to retrieve Qdrant point count after upsert")
+        else:
+            logger.info("[QDRANT] total points now: %d", total_points)
 
         return IngestStats(
             files_processed=len(documents),
