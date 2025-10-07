@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Iterable, List
 
 from qdrant_client import QdrantClient
@@ -55,7 +56,7 @@ class QdrantVectorStore:
             }
             points.append(
                 rest.PointStruct(
-                    id=f"{chunk.sha}_{chunk.chunk_index}",
+                    id=_make_point_id(chunk),
                     vector=vector,
                     payload=payload,
                 )
@@ -87,3 +88,10 @@ class QdrantVectorStore:
             return status is not None
         except Exception:
             return False
+
+
+def _make_point_id(chunk: Chunk) -> str:
+    """Create a deterministic UUID for the provided chunk."""
+
+    source = f"{chunk.sha}:{chunk.chunk_index}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, source))
