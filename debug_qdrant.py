@@ -19,6 +19,9 @@ def main() -> None:
     api_key = _clean(os.getenv("QDRANT_API_KEY"), settings.qdrant.api_key)
     collection = _clean(os.getenv("QDRANT_COLLECTION"), settings.qdrant.collection)
 
+    masked_key = "present" if api_key else "none"
+    print(f"Using Qdrant endpoint: {url} (api_key={masked_key})")
+
     client = QdrantClient(url=url, api_key=api_key or None)
 
     collections = client.get_collections()

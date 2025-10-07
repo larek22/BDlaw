@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import hashlib
 import logging
-import uuid
 from typing import Iterable, List, Optional
 
 from qdrant_client import QdrantClient
@@ -11,6 +11,11 @@ from .chunker import Chunk
 from .settings import AppSettings
 
 logger = logging.getLogger(__name__)
+
+_EMBEDDING_DIMENSIONS: dict[str, int] = {
+    "text-embedding-3-large": 3072,
+    "text-embedding-3-small": 1536,
+}
 
 
 class QdrantVectorStore:
@@ -59,7 +64,8 @@ class QdrantVectorStore:
                 "Recreating collection %s with dimension %d", collection, vector_size
             )
             self._client.recreate_collection(
-                collection_name=collection, vectors_config=vectors_config
+                collection_name=collection,
+                vectors_config=vectors_config,
             )
             return
 
@@ -100,13 +106,38 @@ class QdrantVectorStore:
             )
 
         self._client.recreate_collection(
-            collection_name=collection, vectors_config=vectors_config
+            collection_name=collection,
+            vectors_config=vectors_config,
         )
 
-    def upsert_chunks(self, chunks: Iterable[Chunk], vectors: List[List[float]]) -> None:
+    def upsert_chunks(
+        self,
+        chunks: Iterable[Chunk],
+        vectors: List[List[float]],
+        *,
+        embedding_model: str,
+        chunk_size: int,
+        chunk_overlap: int,
+    ) -> None:
+        chunk_list = list(chunks)
+        if len(chunk_list) != len(vectors):
+            raise ValueError(
+                f"Chunk/vector length mismatch: received {len(chunk_list)} chunks "
+                f"and {len(vectors)} vectors"
+            )
+
+        expected_dim = _vector_size_for_model(embedding_model)
+        if vectors:
+            actual_dim = len(vectors[0])
+            if actual_dim != expected_dim:
+                raise ValueError(
+                    f"Embedding dimension mismatch: expected {expected_dim} "
+                    f"(model={embedding_model}) but received {actual_dim}"
+                )
+
         batch_size = max(1, self.settings.qdrant.upsert_batch_size)
         points: List[rest.PointStruct] = []
-        for chunk, vector in zip(chunks, vectors):
+        for chunk, vector in zip(chunk_list, vectors):
             payload = {
                 "doc_id": chunk.doc_id,
                 "path": chunk.path,
@@ -118,20 +149,35 @@ class QdrantVectorStore:
             }
             points.append(
                 rest.PointStruct(
-                    id=_make_point_id(chunk),
+                    id=_make_point_id(
+                        chunk,
+                        embedding_model=embedding_model,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap,
+                    ),
                     vector=vector,
                     payload=payload,
                 )
             )
             if len(points) >= batch_size:
-                self._upsert_batch(points)
+                self._upsert_batch(points, expected_dim)
                 points = []
         if points:
-            self._upsert_batch(points)
+            self._upsert_batch(points, expected_dim)
 
-    def _upsert_batch(self, points: List[rest.PointStruct]) -> None:
+    def _upsert_batch(self, points: List[rest.PointStruct], vector_dim: int) -> None:
+        logger.info(
+            "[UPSERT] collection=%s points=%d dim=%d",
+            self.collection_name,
+            len(points),
+            vector_dim,
+        )
         try:
-            self._client.upsert(collection_name=self.collection_name, points=points)
+            self._client.upsert(
+                collection_name=self.collection_name,
+                points=points,
+                wait=True,
+            )
         except Exception:
             logger.exception("Failed to upsert batch with %d points", len(points))
             raise
@@ -161,17 +207,39 @@ class QdrantVectorStore:
         except Exception:
             return False
 
+    def vector_size_for_model(self, model: str) -> int:
+        return _vector_size_for_model(model)
 
-def _make_point_id(chunk: Chunk) -> str:
-    """Create a deterministic UUID for the provided chunk."""
 
-    source = f"{chunk.sha}:{chunk.chunk_index}"
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, source))
+def _make_point_id(
+    chunk: Chunk,
+    *,
+    embedding_model: str,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> int:
+    """Create a deterministic integer point id for the provided chunk."""
+
+    source = "|".join(
+        [
+            chunk.path,
+            str(chunk.chunk_index),
+            chunk.sha,
+            embedding_model,
+            str(chunk_size),
+            str(chunk_overlap),
+        ]
+    )
+    digest = hashlib.sha1(source.encode("utf-8")).hexdigest()[:18]
+    return int(digest, 16)
 
 
 def _vector_size_for_model(model: str) -> int:
-    if model == "text-embedding-3-large":
-        return 3072
+    if model in _EMBEDDING_DIMENSIONS:
+        return _EMBEDDING_DIMENSIONS[model]
+    logger.warning(
+        "Unknown embedding model %s; defaulting vector size to 1536", model
+    )
     return 1536
 
 

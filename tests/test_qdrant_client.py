@@ -1,5 +1,3 @@
-import uuid
-
 import pytest
 
 pytest.importorskip("qdrant_client")
@@ -8,7 +6,7 @@ from app.chunker import Chunk
 from app.qdrant_client import _make_point_id, _vector_size_for_model, _mask_api_key
 
 
-def test_make_point_id_returns_deterministic_uuid():
+def test_make_point_id_returns_deterministic_int():
     chunk = Chunk(
         doc_id="doc",
         path="/tmp/doc",
@@ -19,14 +17,20 @@ def test_make_point_id_returns_deterministic_uuid():
         sha="a" * 64,
     )
 
-    point_id = _make_point_id(chunk)
+    point_id = _make_point_id(
+        chunk,
+        embedding_model="text-embedding-3-large",
+        chunk_size=1200,
+        chunk_overlap=120,
+    )
 
-    # ensure valid uuid string
-    parsed = uuid.UUID(point_id)
-    assert str(parsed) == point_id
-
-    # ensure deterministic for same chunk
-    assert point_id == _make_point_id(chunk)
+    assert isinstance(point_id, int)
+    assert point_id == _make_point_id(
+        chunk,
+        embedding_model="text-embedding-3-large",
+        chunk_size=1200,
+        chunk_overlap=120,
+    )
 
     # ensure different chunk index changes id
     different = Chunk(
@@ -38,7 +42,13 @@ def test_make_point_id_returns_deterministic_uuid():
         text="hello",
         sha="a" * 64,
     )
-    assert _make_point_id(different) != point_id
+    different_id = _make_point_id(
+        different,
+        embedding_model="text-embedding-3-large",
+        chunk_size=1200,
+        chunk_overlap=120,
+    )
+    assert different_id != point_id
 
 
 def test_vector_size_for_model_defaults():

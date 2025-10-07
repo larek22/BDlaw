@@ -71,6 +71,12 @@ class IngestService:
         sha_to_vector = {result.sha: result.vector for result in embeddings}
         vectors = [sha_to_vector[chunk.sha] for chunk in all_chunks]
         vector_dim = len(vectors[0]) if vectors else 0
+        expected_dim = self.vector_store.vector_size_for_model(embedding_model)
+        if vectors and vector_dim != expected_dim:
+            raise ValueError(
+                f"Embedding dimension mismatch: expected {expected_dim} from {embedding_model} "
+                f"but received {vector_dim}"
+            )
         logger.info(
             "[UPSERT] collection=%s points=%d dim=%d",
             self.vector_store.collection_name,
@@ -79,7 +85,13 @@ class IngestService:
         )
 
         try:
-            self.vector_store.upsert_chunks(all_chunks, vectors)
+            self.vector_store.upsert_chunks(
+                all_chunks,
+                vectors,
+                embedding_model=embedding_model,
+                chunk_size=chunk_size,
+                chunk_overlap=overlap,
+            )
         except Exception:
             logger.exception("Failed to upsert vectors to Qdrant")
             raise
