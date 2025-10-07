@@ -1,0 +1,8 @@
+openai>=1.14.0
+pyside6>=6.6.0
+qdrant-client>=1.7.3
+pdfminer.six>=20221105
+python-docx>=0.8.11
+striprtf>=0.0.26
+tiktoken>=0.5.2
+pytest>=7.4.0
