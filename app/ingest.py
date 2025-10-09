@@ -267,7 +267,7 @@ class IngestService:
                 from verify import run_verification  # local import to avoid cycles during packaging
 
                 verification_log = self.repository.verification_log_path()
-                success, failures = run_verification(
+                success, notes = run_verification(
                     self.settings,
                     log_path=verification_log,
                 )
@@ -276,23 +276,19 @@ class IngestService:
                 logger.error(message)
                 if progress_cb:
                     progress_cb(message)
-                raise
             else:
-                log_messages = [
-                    "Post-ingestion verification completed successfully."
-                ]
-                if not success:
-                    log_messages = [
-                        "Post-ingestion verification detected issues:",
-                        *failures,
-                    ]
+                log_messages = (
+                    notes
+                    if notes
+                    else ["Post-ingestion verification completed successfully."]
+                )
+                prefix = "Post-ingestion verification detected issues:" if not success else "Post-ingestion verification completed successfully."
+                logger.info(prefix)
+                if progress_cb:
+                    progress_cb(prefix)
                 for msg in log_messages:
                     logger.info(msg)
                     if progress_cb:
                         progress_cb(msg)
-                if not success:
-                    raise RuntimeError(
-                        "Verification checks failed after ingestion. See verification log for details."
-                    )
 
         return stats

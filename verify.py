@@ -156,6 +156,7 @@ def run_verification(
         return False, lines
 
     failures: List[str] = []
+    info_messages: List[str] = []
     try:
         total_points = vector_store.count_points()
     except Exception as exc:
@@ -195,7 +196,7 @@ def run_verification(
     )
     log_lines = info_messages + [summary]
     _write_log(log_destination, log_lines)
-    return True, []
+    return True, log_lines
 
 
 def main() -> None:
