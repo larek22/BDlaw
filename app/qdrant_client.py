@@ -4,13 +4,19 @@ import logging
 from typing import Dict, List, Optional, Sequence
 
 import httpx
-from qdrant_client import QdrantClient, __version__ as qdrant_client_version
+import importlib.metadata
+from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
 
 from .legal_types import ChunkRecord
 from .settings import AppSettings
 
 logger = logging.getLogger(__name__)
+
+try:
+    qdrant_client_version = importlib.metadata.version("qdrant-client")
+except importlib.metadata.PackageNotFoundError:
+    qdrant_client_version = "unknown"
 
 _EMBEDDING_DIMENSIONS: dict[str, int] = {
     "text-embedding-3-large": 3072,
