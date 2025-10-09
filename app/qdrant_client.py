@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import logging
+import uuid
 from typing import Iterable, List, Optional
 
 from qdrant_client import QdrantClient
@@ -217,8 +217,8 @@ def _make_point_id(
     embedding_model: str,
     chunk_size: int,
     chunk_overlap: int,
-) -> int:
-    """Create a deterministic integer point id for the provided chunk."""
+) -> str:
+    """Create a deterministic UUID point id for the provided chunk."""
 
     source = "|".join(
         [
@@ -230,8 +230,7 @@ def _make_point_id(
             str(chunk_overlap),
         ]
     )
-    digest = hashlib.sha1(source.encode("utf-8")).hexdigest()[:18]
-    return int(digest, 16)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, source))
 
 
 def _vector_size_for_model(model: str) -> int:

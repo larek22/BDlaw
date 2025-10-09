@@ -6,7 +6,7 @@ from app.chunker import Chunk
 from app.qdrant_client import _make_point_id, _vector_size_for_model, _mask_api_key
 
 
-def test_make_point_id_returns_deterministic_int():
+def test_make_point_id_returns_deterministic_uuid():
     chunk = Chunk(
         doc_id="doc",
         path="/tmp/doc",
@@ -24,7 +24,8 @@ def test_make_point_id_returns_deterministic_int():
         chunk_overlap=120,
     )
 
-    assert isinstance(point_id, int)
+    assert isinstance(point_id, str)
+    assert len(point_id) == 36  # UUID string length with hyphens
     assert point_id == _make_point_id(
         chunk,
         embedding_model="text-embedding-3-large",
