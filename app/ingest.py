@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, List, Sequence
 
 from .data_repository import DataRepository
-from .legal_pipeline import LegalCorpusBuilder, ProcessedDocument, normalize_text
+from .legal_pipeline import (
+    LegalCorpusBuilder,
+    ProcessedDocument,
+    doc_prefix,
+    normalize_text,
+)
 from .legal_types import ChunkRecord
 from .settings import AppSettings
 from .qdrant_client import QdrantVectorStore
@@ -104,6 +109,7 @@ class IngestService:
                 )
             processed_documents.append(processed)
 
+        prefix_expected_counts: Dict[str, int] = {}
         changed_chunks: List[ChunkRecord] = []
         changed_doc_ids: set[str] = set()
         unchanged_doc_ids: set[str] = set()
@@ -112,6 +118,11 @@ class IngestService:
             unchanged_doc_ids.update(processed.doc_ids_unchanged)
             changed_set = set(processed.doc_ids_changed)
             for chunk in processed.chunks:
+                prefix = doc_prefix(chunk.doc_id)
+                if prefix:
+                    prefix_expected_counts[prefix] = (
+                        prefix_expected_counts.get(prefix, 0) + 1
+                    )
                 if chunk.doc_id in changed_set:
                     changed_chunks.append(chunk)
 
@@ -257,6 +268,89 @@ class IngestService:
                 else:
                     report("[VERIFY] sample search returned no hits", level=logging.WARNING)
 
+        if prefix_expected_counts:
+            try:
+                actual_counts = {
+                    prefix: self.vector_store.count_points_with_prefix(prefix)
+                    for prefix in prefix_expected_counts
+                }
+            except Exception as exc:
+                message = f"Failed to reconcile Qdrant counts: {exc}"
+                logger.error(message)
+                if progress_cb:
+                    progress_cb(message)
+                raise
+
+            mismatches = [
+                (prefix, prefix_expected_counts[prefix], actual_counts.get(prefix, 0))
+                for prefix in prefix_expected_counts
+                if actual_counts.get(prefix, 0) != prefix_expected_counts[prefix]
+            ]
+
+            for prefix in sorted(prefix_expected_counts):
+                report(
+                    f"[QDRANT] prefix {prefix} expected {prefix_expected_counts[prefix]} chunk(s); "
+                    f"found {actual_counts.get(prefix, 0)}",
+                    level=logging.INFO,
+                )
+
+            if mismatches:
+                detail = ", ".join(
+                    f"{prefix} expected {expected} found {actual}"
+                    for prefix, expected, actual in mismatches
+                )
+                report(
+                    f"[QDRANT] Detected count mismatch ({detail}); purging orphaned points.",
+                    level=logging.WARNING,
+                )
+                try:
+                    removed = self.vector_store.purge_orphans(
+                        prefixes=sorted(prefix_expected_counts)
+                    )
+                except Exception:
+                    logger.exception("Failed to purge orphaned Qdrant points")
+                    raise
+                else:
+                    report(
+                        f"[QDRANT] Purge removed {removed} orphaned point(s)",
+                        level=logging.INFO,
+                    )
+                try:
+                    actual_counts = {
+                        prefix: self.vector_store.count_points_with_prefix(prefix)
+                        for prefix in prefix_expected_counts
+                    }
+                except Exception as exc:
+                    message = f"Failed to reconcile Qdrant counts after purge: {exc}"
+                    logger.error(message)
+                    if progress_cb:
+                        progress_cb(message)
+                    raise
+                post_mismatches = [
+                    (prefix, prefix_expected_counts[prefix], actual_counts.get(prefix, 0))
+                    for prefix in prefix_expected_counts
+                    if actual_counts.get(prefix, 0) != prefix_expected_counts[prefix]
+                ]
+                if post_mismatches:
+                    detail = ", ".join(
+                        f"{prefix} expected {expected} found {actual}"
+                        for prefix, expected, actual in post_mismatches
+                    )
+                    message = f"Qdrant reconciliation failed: {detail}"
+                    logger.error(message)
+                    if progress_cb:
+                        progress_cb(message)
+                    raise RuntimeError(message)
+                report(
+                    "[QDRANT] Reconciliation succeeded after orphan purge.",
+                    level=logging.INFO,
+                )
+            else:
+                report(
+                    "[QDRANT] Reconciliation OK: chunk counts match expected totals.",
+                    level=logging.INFO,
+                )
+
         stats = IngestStats(
             files_processed=len(processed_documents),
             chunks_created=len(changed_chunks),
@@ -276,13 +370,18 @@ class IngestService:
                 logger.error(message)
                 if progress_cb:
                     progress_cb(message)
+                raise
             else:
                 log_messages = (
                     notes
                     if notes
                     else ["Post-ingestion verification completed successfully."]
                 )
-                prefix = "Post-ingestion verification detected issues:" if not success else "Post-ingestion verification completed successfully."
+                prefix = (
+                    "Post-ingestion verification detected issues:"
+                    if not success
+                    else "Post-ingestion verification completed successfully."
+                )
                 logger.info(prefix)
                 if progress_cb:
                     progress_cb(prefix)
@@ -290,5 +389,13 @@ class IngestService:
                     logger.info(msg)
                     if progress_cb:
                         progress_cb(msg)
+                if not success:
+                    message = (
+                        "Verification checks failed after ingestion. See verification log for details."
+                    )
+                    logger.error(message)
+                    if progress_cb:
+                        progress_cb(message)
+                    raise RuntimeError(message)
 
         return stats

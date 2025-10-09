@@ -51,6 +51,7 @@ class DummyVectorStore:
         self.deleted_ids: List[str] = []
         self.upserted: List[ChunkRecord] = []
         self.endpoint_url = "http://dummy"
+        self.purged_prefixes: List[str] = []
 
     def ensure_collection(self, embedding_model: str, recreate: bool = False) -> None:
         self.ensure_calls.append((embedding_model, recreate))
@@ -64,8 +65,15 @@ class DummyVectorStore:
     def count_points(self) -> int:
         return len(self.upserted)
 
+    def count_points_with_prefix(self, prefix: str) -> int:
+        return sum(1 for chunk in self.upserted if chunk.doc_id.startswith(prefix))
+
     def upsert_chunks(self, chunks: Iterable[ChunkRecord], title_vectors, body_vectors) -> None:
         self.upserted = list(chunks)
+
+    def purge_orphans(self, prefixes: Iterable[str]) -> int:
+        self.purged_prefixes = list(prefixes)
+        return 0
 
     def query(self, *, vector_name: str, query_vector: List[float], limit: int, filters=None) -> List[SimpleNamespace]:
         results: List[SimpleNamespace] = []

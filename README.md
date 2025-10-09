@@ -66,6 +66,7 @@ The first launch creates a configuration directory at `~/.vector_kb` containing 
    * Ingestion normalises text into `data/staging/<corpus>/<part>/*.normalized.txt`, extracts article metadata into `*.articles.jsonl`, and writes chunk manifests under `data/chunks/.../*.chunks.jsonl` for deterministic refreshes.
    * Each article version receives a document id such as `gkrf:part3:art1110:v2024-08-08`; re-ingesting unchanged versions is idempotent, while changed versions are deleted and re-upserted by doc id.
    * After every batch upsert the log shows the updated Qdrant point count, the delta versus the previous run, and a verification search so you can confirm vectors are persisted.
+   * Use **Reset DB** for a one-click drop-and-recreate of the collection before a clean rebuild. The app confirms the action, recreates the named-vector schema, and logs the reset so you start from a known-good baseline.
 3. After ingestion, go to the **Ask** tab, enter a question, and click **Search & Answer**. Answers include citations, and sources display highlighted query terms.
 
 ## Configuration

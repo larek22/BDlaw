@@ -195,6 +195,7 @@ class SettingsTab(QWidget):
 
 class IngestTab(QWidget):
     start_ingest = Signal(list, bool)
+    reset_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -211,6 +212,10 @@ class IngestTab(QWidget):
         self.clear_button = QPushButton("Clear")
         self.clear_button.clicked.connect(self.clear_files)
         button_row.addWidget(self.clear_button)
+
+        self.reset_button = QPushButton("Reset DB")
+        self.reset_button.clicked.connect(self._emit_reset)
+        button_row.addWidget(self.reset_button)
 
         self.rebuild_checkbox = QCheckBox("Rebuild Collection")
         button_row.addWidget(self.rebuild_checkbox)
@@ -267,6 +272,7 @@ class IngestTab(QWidget):
     def set_running(self, running: bool) -> None:
         self.add_files_button.setEnabled(not running)
         self.clear_button.setEnabled(not running)
+        self.reset_button.setEnabled(not running)
         self.ingest_button.setEnabled((not running) and self.file_list.count() > 0)
         if running:
             self.progress_bar.show()
@@ -275,6 +281,9 @@ class IngestTab(QWidget):
 
     def append_log(self, message: str) -> None:
         self.log_output.appendPlainText(message)
+
+    def _emit_reset(self) -> None:
+        self.reset_requested.emit()
 
 
 class QueryTab(QWidget):
@@ -384,6 +393,7 @@ class MainWindow(QMainWindow):
         self.settings_tab.test_qdrant_button.clicked.connect(self._test_qdrant)
 
         self.ingest_tab.start_ingest.connect(self._start_ingest)
+        self.ingest_tab.reset_requested.connect(self._reset_collection)
         self.query_tab.start_query.connect(self._start_query)
 
     def _init_services(self) -> None:
@@ -418,6 +428,34 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Qdrant", "Qdrant is reachable but collection not found")
         except Exception as exc:
             QMessageBox.critical(self, "Qdrant", f"Qdrant test failed: {exc}")
+
+    def _reset_collection(self) -> None:
+        if not self.vector_store:
+            QMessageBox.critical(self, "Reset DB", "Vector store is not initialised")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Reset Vector DB",
+            "This will drop and recreate the configured Qdrant collection. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            embedding_model = self.settings.openai_models.embedding
+            self.vector_store.reset_collection(embedding_model)
+        except Exception as exc:
+            logger.exception("Failed to reset Qdrant collection")
+            message = f"Failed to reset collection: {exc}"
+            if self.ingest_tab:
+                self.ingest_tab.append_log(message)
+            QMessageBox.critical(self, "Reset DB", message)
+        else:
+            message = "Collection reset successfully."
+            if self.ingest_tab:
+                self.ingest_tab.append_log(message)
+            QMessageBox.information(self, "Reset DB", message)
 
     def _start_ingest(self, paths: Sequence[str], recreate: bool) -> None:
         if not paths:

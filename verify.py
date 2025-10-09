@@ -14,6 +14,7 @@ from app.logging_config import configure_logging
 from app.qdrant_client import QdrantVectorStore
 from app.query_pipeline import QueryPipeline
 from app.settings import AppSettings
+from app.legal_pipeline import doc_prefix
 
 _REFERENCE_QUERIES = {
     "обязательная доля в наследстве": ["gkrf:part4:art1149", "gkrf:part3:art1149"],
@@ -46,6 +47,27 @@ def _load_sample_titles(repository: DataRepository, limit: int) -> List[Tuple[st
             break
     random.shuffle(samples)
     return samples[:limit]
+
+
+def _collect_expected_counts(repository: DataRepository) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    chunk_dir = repository.paths.chunks
+    if not chunk_dir.exists():
+        return counts
+    for path in sorted(chunk_dir.rglob("*.chunks.jsonl")):
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    data = json.loads(line)
+                    doc_id = data.get("doc_id")
+                    if not isinstance(doc_id, str):
+                        continue
+                    prefix = doc_prefix(doc_id)
+                    if prefix:
+                        counts[prefix] = counts.get(prefix, 0) + 1
+        except Exception:
+            continue
+    return counts
 
 
 def _check_reference_queries(
@@ -165,6 +187,35 @@ def run_verification(
 
     if total_points <= 0:
         failures.append("Qdrant collection is empty. Run ingestion before verification.")
+
+    expected_counts = _collect_expected_counts(repository)
+    if expected_counts:
+        total_expected = sum(expected_counts.values())
+        if total_points != total_expected:
+            failures.append(
+                f"Total point count mismatch: expected {total_expected} chunk(s) but found {total_points}."
+            )
+        else:
+            info_messages.append(
+                f"Total point count matches expected chunk total ({total_expected})."
+            )
+        for prefix in sorted(expected_counts):
+            expected = expected_counts[prefix]
+            try:
+                actual = vector_store.count_points_with_prefix(prefix)
+            except Exception as exc:
+                failures.append(f"Failed to count prefix {prefix}: {exc}")
+                continue
+            if actual != expected:
+                failures.append(
+                    f"Prefix {prefix} mismatch: expected {expected} chunk(s) but found {actual}."
+                )
+            else:
+                info_messages.append(
+                    f"Prefix {prefix} contains {actual} chunk(s) as expected."
+                )
+    else:
+        info_messages.append("No chunk metadata found on disk for reconciliation checks.")
 
     try:
         available_doc_ids = list(vector_store.iter_doc_ids())

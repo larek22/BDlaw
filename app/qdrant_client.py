@@ -131,6 +131,20 @@ class QdrantVectorStore:
         else:
             self._ensure_payload_indexes()
 
+    def reset_collection(self, embedding_model: str) -> None:
+        collection = self.collection_name
+        vector_size = _vector_size_for_model(embedding_model)
+        logger.info(
+            "Resetting collection %s with vector dimension %d", collection, vector_size
+        )
+        try:
+            self._client.delete_collection(collection_name=collection)
+        except Exception as exc:
+            message = str(exc).lower()
+            if "not found" not in message:
+                logger.warning("Failed to delete collection %s: %s", collection, exc)
+        self.ensure_collection(embedding_model=embedding_model, recreate=True)
+
     def _ensure_payload_indexes(self) -> None:
         collection = self.collection_name
         keyword = _payload_schema("keyword")
@@ -367,6 +381,91 @@ class QdrantVectorStore:
             logger.exception("Failed to count points for collection %s", self.collection_name)
             raise
         return int(getattr(response, "count", 0))
+
+    def count_points_with_prefix(self, prefix: str) -> int:
+        if not prefix:
+            return 0
+        count = 0
+        offset = None
+        while True:
+            try:
+                points, offset = self._client.scroll(
+                    collection_name=self.collection_name,
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to scroll points for prefix reconciliation in %s",
+                    self.collection_name,
+                )
+                raise
+            if not points:
+                break
+            for point in points:
+                payload = getattr(point, "payload", {}) or {}
+                doc_id = str(payload.get("doc_id") or "")
+                if doc_id.startswith(prefix):
+                    count += 1
+            if not offset:
+                break
+        return count
+
+    def purge_orphans(self, prefixes: Sequence[str]) -> int:
+        allowed = [prefix for prefix in prefixes if prefix]
+        removed = 0
+        offset = None
+        batch: List[str] = []
+
+        def flush() -> None:
+            nonlocal removed, batch
+            valid_ids = [point_id for point_id in batch if point_id]
+            if not valid_ids:
+                batch = []
+                return
+            try:
+                self._client.delete(
+                    collection_name=self.collection_name,
+                    points_selector=valid_ids,
+                    wait=True,
+                )
+            except Exception:
+                logger.exception("Failed to delete orphaned points: %s", valid_ids)
+                raise
+            removed += len(valid_ids)
+            batch = []
+
+        while True:
+            try:
+                points, offset = self._client.scroll(
+                    collection_name=self.collection_name,
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to scroll for orphan purge in %s", self.collection_name
+                )
+                raise
+            if not points:
+                break
+            for point in points:
+                payload = getattr(point, "payload", {}) or {}
+                doc_id = str(payload.get("doc_id") or "")
+                keep = bool(doc_id)
+                if keep and allowed:
+                    keep = any(doc_id.startswith(prefix) for prefix in allowed)
+                if not keep:
+                    batch.append(str(getattr(point, "id", "")))
+                if len(batch) >= 256:
+                    flush()
+            if not offset:
+                break
+        if batch:
+            flush()
+        return removed
 
     def query(
         self,

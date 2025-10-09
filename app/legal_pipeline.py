@@ -4,7 +4,6 @@ import hashlib
 import json
 import logging
 import re
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
@@ -35,7 +34,26 @@ _WORD_TO_NUM = {
     "пятая": 5,
     "пятой": 5,
 }
-_UUID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "vector-kb:gkrf")
+def doc_prefix(doc_id: str) -> str:
+    """Return the stable prefix for a legal document identifier."""
+
+    if not doc_id:
+        return ""
+    if ":art" in doc_id:
+        return doc_id.split(":art", 1)[0] + ":"
+    if ":v" in doc_id:
+        base = doc_id.split(":v", 1)[0]
+        head, *_ = base.rsplit(":", 1)
+        return f"{head}:"
+    head, *_ = doc_id.rsplit(":", 1)
+    return f"{head}:"
+
+
+def make_chunk_id(doc_id: str, chunk_index: int) -> str:
+    """Generate a deterministic identifier for a chunk."""
+
+    raw = f"{doc_id}|{chunk_index}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -336,7 +354,7 @@ class LegalCorpusBuilder:
     def _make_chunk(self, article: ArticleRecord, chunk_index: int, body: str) -> ChunkRecord:
         body_sha = _hash_text(body)
         title_sha = _hash_text(article.title_text)
-        chunk_id = str(uuid.uuid5(_UUID_NAMESPACE, f"{article.doc_id}#{chunk_index}"))
+        chunk_id = make_chunk_id(article.doc_id, chunk_index)
         return ChunkRecord(
             doc_id=article.doc_id,
             chunk_index=chunk_index,
