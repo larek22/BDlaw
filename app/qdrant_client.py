@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, Iterator, List, Optional, Sequence, Set
 
 import httpx
 import importlib.metadata
@@ -395,6 +395,57 @@ class QdrantVectorStore:
                 rest.FieldCondition(key="body_text", match=rest.MatchText(text=query)),
             ]
         )
+
+    def iter_doc_ids(
+        self,
+        *,
+        batch_size: int = 256,
+        limit: Optional[int] = None,
+    ) -> Iterator[str]:
+        """Yield unique doc_id values stored in the collection."""
+
+        seen: Set[str] = set()
+        fetched = 0
+        offset = None
+
+        while True:
+            if limit is not None and fetched >= limit:
+                break
+            request_limit = batch_size
+            if limit is not None:
+                request_limit = min(request_limit, max(0, limit - fetched))
+                if request_limit == 0:
+                    break
+            try:
+                points, offset = self._client.scroll(
+                    collection_name=self.collection_name,
+                    limit=request_limit,
+                    offset=offset,
+                    with_payload=True,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to scroll doc ids from collection %s", self.collection_name
+                )
+                raise
+
+            if not points:
+                break
+
+            for point in points:
+                payload = getattr(point, "payload", {}) or {}
+                doc_id = payload.get("doc_id")
+                if not doc_id:
+                    continue
+                doc_id_str = str(doc_id)
+                if doc_id_str in seen:
+                    continue
+                seen.add(doc_id_str)
+                fetched += 1
+                yield doc_id_str
+
+            if not offset:
+                break
 
     def _fetch_server_version(self) -> Optional[str]:
         base = _normalise_base_url(self._endpoint_url)
