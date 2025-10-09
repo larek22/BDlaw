@@ -36,6 +36,8 @@ class ArticleRecord:
     hierarchy: HierarchyMetadata
     law_meta: LawMetadata
     source_path: Path
+    source_file_name: str
+    source_relative_path: str | None
     source_sha256: str
 
 

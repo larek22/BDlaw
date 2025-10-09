@@ -33,11 +33,14 @@ class IngestService:
         vector_store: QdrantVectorStore,
         reader_factory: "DocumentReaderFactory" | None = None,
         repository: DataRepository | None = None,
+        *,
+        verify_after_ingest: bool = True,
     ) -> None:
         self.settings = settings
         self.embedding_client = embedding_client
         self.vector_store = vector_store
         self.repository = repository or DataRepository()
+        self.verify_after_ingest = verify_after_ingest
         if reader_factory is None:
             from .readers.factory import DocumentReaderFactory  # local import to avoid optional deps at import time
 
@@ -254,8 +257,42 @@ class IngestService:
                 else:
                     report("[VERIFY] sample search returned no hits", level=logging.WARNING)
 
-        return IngestStats(
+        stats = IngestStats(
             files_processed=len(processed_documents),
             chunks_created=len(changed_chunks),
             skipped=skipped,
         )
+        if self.verify_after_ingest and stats.chunks_created > 0:
+            try:
+                from verify import run_verification  # local import to avoid cycles during packaging
+
+                verification_log = self.repository.verification_log_path()
+                success, failures = run_verification(
+                    self.settings,
+                    log_path=verification_log,
+                )
+            except Exception as exc:
+                message = f"Post-ingestion verification failed unexpectedly: {exc}"
+                logger.error(message)
+                if progress_cb:
+                    progress_cb(message)
+                raise
+            else:
+                log_messages = [
+                    "Post-ingestion verification completed successfully."
+                ]
+                if not success:
+                    log_messages = [
+                        "Post-ingestion verification detected issues:",
+                        *failures,
+                    ]
+                for msg in log_messages:
+                    logger.info(msg)
+                    if progress_cb:
+                        progress_cb(msg)
+                if not success:
+                    raise RuntimeError(
+                        "Verification checks failed after ingestion. See verification log for details."
+                    )
+
+        return stats

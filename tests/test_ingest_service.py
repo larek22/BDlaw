@@ -110,6 +110,7 @@ def test_ingest_writes_chunks_and_logs_progress(tmp_path: Path) -> None:
         vector_store=DummyVectorStore(),
         reader_factory=DummyReaderFactory(),
         repository=repository,
+        verify_after_ingest=False,
     )
 
     raw_file = repository.paths.raw / "gk_rf" / "part_1" / "law.rtf"

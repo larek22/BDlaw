@@ -19,6 +19,26 @@ def _env_default(key: str, default: str | None = None) -> str | None:
     return default
 
 
+def _env_float(key: str, default: float) -> float:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _env_int(key: str, default: int) -> int:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 @dataclass
 class ModelSettings:
     embedding: str = "text-embedding-3-large"
@@ -27,23 +47,29 @@ class ModelSettings:
 
 @dataclass
 class QdrantSettings:
-    url: str = "http://localhost:6333"
-    api_key: str = ""
-    collection: str = "kb_docs_v1"
-    upsert_batch_size: int = 128
-    timeout_seconds: float = 30.0
+    url: str = _env_default("QDRANT_URL", "http://localhost:6333") or "http://localhost:6333"
+    api_key: str = _env_default("QDRANT_API_KEY", "") or ""
+    collection: str = _env_default("QDRANT_COLLECTION", "kb_docs_v1") or "kb_docs_v1"
+    upsert_batch_size: int = _env_int("QDRANT_UPSERT_BATCH_SIZE", 128)
+    timeout_seconds: float = _env_float("QDRANT_TIMEOUT_SECONDS", 30.0)
 
 
 @dataclass
 class IngestSettings:
-    chunk_size_chars: int = 1200
-    chunk_overlap_chars: int = 120
+    chunk_size_chars: int = _env_int("CHUNK_SIZE", 1200)
+    chunk_overlap_chars: int = _env_int("CHUNK_OVERLAP", 120)
 
 
 @dataclass
 class QuerySettings:
-    top_k: int = 10
-    prefilter_limit: int = 400
+    top_k: int = _env_int("QUERY_TOP_K", 10)
+    prefilter_limit: int = _env_int("QUERY_PREFILTER_LIMIT", 400)
+    fusion_weight_title: float = _env_float("FUSION_WEIGHT_TITLE", 0.4)
+    fusion_weight_body: float = _env_float("FUSION_WEIGHT_BODY", 0.6)
+    fusion_rrf_k: int = _env_int("FUSION_RRF_K", 60)
+    as_of_date: str | None = _env_default("QUERY_AS_OF_DATE", None)
+    as_of_start_date: str | None = _env_default("QUERY_AS_OF_START", None)
+    status_filter: str = _env_default("QUERY_STATUS", "active") or "active"
 
 
 @dataclass

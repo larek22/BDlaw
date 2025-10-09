@@ -4,6 +4,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _normalise(path: Path) -> Path:
+    """Return a normalised path with forward slashes for storage."""
+
+    return Path(str(path).replace("\\", "/"))
+
+
 @dataclass
 class RepositoryPaths:
     root: Path
@@ -33,13 +39,22 @@ class DataRepository:
     def derive_slugs(self, source_path: Path) -> tuple[str, str]:
         try:
             relative = source_path.relative_to(self.paths.raw)
+            parts = relative.parts
         except ValueError:
             parts = source_path.parts
-        else:
-            parts = relative.parts
         corpus_slug = self._slug(parts[0]) if parts else "default"
         part_slug = self._slug(parts[1]) if len(parts) > 1 else "general"
         return corpus_slug, part_slug
+
+    def relative_to_raw(self, source_path: Path) -> str | None:
+        try:
+            relative = source_path.relative_to(self.paths.raw)
+        except ValueError:
+            return None
+        return _normalise(relative).as_posix()
+
+    def verification_log_path(self) -> Path:
+        return self.paths.logs / "verification.log"
 
     def ensure_subdirectories(self, corpus_slug: str, part_slug: str) -> tuple[Path, Path]:
         staging_dir = self.paths.staging / corpus_slug / part_slug

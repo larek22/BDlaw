@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from app.data_repository import DataRepository
 from app.logging_config import configure_logging
 from app.qdrant_client import QdrantVectorStore
 from app.settings import AppSettings
+from verify import run_verification
 
 
 def _create_snapshot(vector_store: QdrantVectorStore, output: Path | None) -> Path:
@@ -27,7 +29,9 @@ def _create_snapshot(vector_store: QdrantVectorStore, output: Path | None) -> Pa
 
     destination_dir = output or DataRepository().paths.snapshots
     destination_dir.mkdir(parents=True, exist_ok=True)
-    destination = destination_dir / snapshot_name
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    filename = f"{vector_store.collection_name}-{timestamp}.snapshot"
+    destination = destination_dir / filename
     client.download_snapshot(
         collection_name=vector_store.collection_name,
         snapshot_name=snapshot_name,
@@ -45,6 +49,11 @@ def _restore_snapshot(vector_store: QdrantVectorStore, snapshot_path: Path) -> N
         snapshot_path=str(snapshot_path),
         wait=True,
     )
+    success, failures = run_verification(vector_store.settings)
+    if not success:
+        raise RuntimeError(
+            "Snapshot restore completed but verification failed: " + "; ".join(failures)
+        )
 
 
 def main() -> None:

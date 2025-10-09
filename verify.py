@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import random
 import sys
+from datetime import datetime
+from pathlib import Path
 from typing import List, Tuple
 
 from app.data_repository import DataRepository
@@ -16,6 +18,7 @@ from app.settings import AppSettings
 _REFERENCE_QUERIES = {
     "обязательная доля в наследстве": ["gkrf:part4:art1149"],
     "исключительное право": ["gkrf:part4:art1229", "gkrf:part4:art1255"],
+    "лицензионный договор": ["gkrf:part4:art1235", "gkrf:part4:art1236"],
 }
 
 _SAMPLE_LIMIT = 5
@@ -96,17 +99,34 @@ def _check_self_hits(
     return failures
 
 
-def main() -> None:
-    configure_logging()
-    settings = AppSettings.load()
+def _write_log(log_path: Path, lines: List[str]) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"[{timestamp}]\n")
+        for line in lines:
+            handle.write(line)
+            handle.write("\n")
+        handle.write("\n")
+
+
+def run_verification(
+    settings: AppSettings | None = None,
+    *,
+    log_path: Path | None = None,
+) -> tuple[bool, List[str]]:
+    settings = settings or AppSettings.load()
+    repository = DataRepository()
+    log_destination = log_path or repository.verification_log_path()
 
     try:
         vector_store = QdrantVectorStore(settings)
         embedding_client = EmbeddingClient(settings)
         pipeline = QueryPipeline(settings, embedding_client, vector_store)
-    except Exception as exc:  # pragma: no cover - runtime failures
-        print(f"Verification initialisation failed: {exc}", file=sys.stderr)
-        sys.exit(1)
+    except Exception as exc:
+        lines = [f"Verification initialisation failed: {exc}"]
+        _write_log(log_destination, lines)
+        return False, lines
 
     failures: List[str] = []
     try:
@@ -120,7 +140,6 @@ def main() -> None:
 
     failures.extend(_check_reference_queries(pipeline))
 
-    repository = DataRepository()
     samples = _load_sample_titles(repository, _SAMPLE_LIMIT)
     if not samples:
         failures.append("No chunk metadata found for self-hit checks.")
@@ -128,14 +147,26 @@ def main() -> None:
         failures.extend(_check_self_hits(vector_store, embedding_client, samples))
 
     if failures:
-        for failure in failures:
-            print(f"FAIL: {failure}", file=sys.stderr)
-        sys.exit(1)
+        lines = ["Verification failed:", *failures]
+        _write_log(log_destination, lines)
+        return False, failures
 
-    print(
+    summary = (
         f"Verification succeeded: {total_points} vectors available, "
         f"{len(_REFERENCE_QUERIES)} reference queries and {len(samples)} self-hits passed."
     )
+    _write_log(log_destination, [summary])
+    return True, []
+
+
+def main() -> None:
+    configure_logging()
+    success, failures = run_verification()
+    if not success:
+        for failure in failures:
+            print(f"FAIL: {failure}", file=sys.stderr)
+        sys.exit(1)
+    print("Verification succeeded.")
 
 
 if __name__ == "__main__":  # pragma: no cover

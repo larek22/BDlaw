@@ -68,6 +68,31 @@ The first launch creates a configuration directory at `~/.vector_kb` containing 
    * After every batch upsert the log shows the updated Qdrant point count, the delta versus the previous run, and a verification search so you can confirm vectors are persisted.
 3. After ingestion, go to the **Ask** tab, enter a question, and click **Search & Answer**. Answers include citations, and sources display highlighted query terms.
 
+## Configuration
+
+The application persists configuration to `~/.vector_kb/config.json`. Any field can also be overridden via environment variables before launch.
+
+| Setting | Environment variable | Description |
+| --- | --- | --- |
+| `openai_api_key` | `OPENAI_API_KEY` | API key used for embeddings and chat completions. |
+| `openai_models.embedding` | `OPENAI_EMBEDDING_MODEL` | Embedding model (default `text-embedding-3-large`). |
+| `openai_models.chat` | `OPENAI_CHAT_MODEL` | Preferred chat model; the pipeline falls back to `gpt-4.1-mini` then `gpt-4o-mini` if access is denied. |
+| `qdrant.url` | `QDRANT_URL` | Qdrant endpoint. HTTPS endpoints require an API key. |
+| `qdrant.api_key` | `QDRANT_API_KEY` | API key used when the URL is HTTPS or a remote HTTP host. |
+| `qdrant.collection` | `QDRANT_COLLECTION` | Collection name (default `kb_docs_v1`). |
+| `qdrant.upsert_batch_size` | `QDRANT_UPSERT_BATCH_SIZE` | Batch size for point upserts. |
+| `qdrant.timeout_seconds` | `QDRANT_TIMEOUT_SECONDS` | HTTP timeout used for Qdrant requests. |
+| `ingest.chunk_size_chars` | `CHUNK_SIZE` | Target chunk size. |
+| `ingest.chunk_overlap_chars` | `CHUNK_OVERLAP` | Character overlap between chunks. |
+| `query.top_k` | `QUERY_TOP_K` | Maximum number of chunks returned per query. |
+| `query.prefilter_limit` | `QUERY_PREFILTER_LIMIT` | Candidate budget for keyword prefiltering. |
+| `query.fusion_weight_title` | `FUSION_WEIGHT_TITLE` | Weight applied to title-vector rankings during fusion. |
+| `query.fusion_weight_body` | `FUSION_WEIGHT_BODY` | Weight applied to body-vector rankings during fusion. |
+| `query.fusion_rrf_k` | `FUSION_RRF_K` | `k` constant in reciprocal-rank fusion. |
+| `query.as_of_start_date` | `QUERY_AS_OF_START` | Optional lower bound for temporal filtering (ISO date). |
+| `query.as_of_date` | `QUERY_AS_OF_DATE` | Optional upper bound (“as-of” date) for temporal filtering. |
+| `query.status_filter` | `QUERY_STATUS` | Status filter applied to `law_meta.status` (default `active`). |
+
 ## Troubleshooting
 
 - **OpenAI model access errors**: On the first question the app probes the configured chat model and two fallbacks (`gpt-4.1-mini`, `gpt-4o-mini`). If none are accessible you will see a clear error asking you to change the Chat Model in Settings.
@@ -81,11 +106,11 @@ data/
   raw/                # Original source files supplied by the user
   staging/            # Normalised text + per-article JSONL files
   chunks/             # Chunk JSONL + manifest files used for deterministic refresh
-snapshots/            # Place exported Qdrant snapshot files here
-logs/                 # Optional location for additional logs
+  snapshots/          # Exported Qdrant snapshot files
+  logs/               # Verification transcripts and additional logs
 ```
 
-Each staging JSON record preserves the legal hierarchy (Part/Chapter/Article) along with law numbers, enact dates, and amendment metadata. Chunk JSON lines store the chunk hash, deterministic UUID, and named-vector texts ready for embedding.
+Each staging JSON record preserves the legal hierarchy (Part/Chapter/Article) along with law numbers, enact dates, and amendment metadata. Chunk JSON lines store the chunk hash, deterministic UUID, and named-vector texts ready for embedding. Payload metadata stores the original file name and relative path within `data/raw` so the corpus can be moved between machines without leaking absolute host paths.
 
 ## Qdrant schema
 
@@ -100,7 +125,7 @@ The application creates (or recreates) the collection with two named vectors per
 }
 ```
 
-Payload indexes are installed for `doc_id`, the legal hierarchy fields, law status and amendment date, and for full-text search over `title_text` and `body_text`. Hybrid retrieval first applies a keyword filter, runs vector search on both named vectors, and fuses the results.
+Payload indexes are installed for `doc_id`, the legal hierarchy fields, law status and amendment date, and for full-text search over `title_text` and `body_text`. Hybrid retrieval first applies a keyword filter, runs vector search on both named vectors, and fuses the results using reciprocal-rank fusion with configurable weights. Temporal filters derived from `QUERY_STATUS`, `QUERY_AS_OF_START`, and `QUERY_AS_OF_DATE` ensure answers respect “as-of” queries.
 
 ## Exporting the vector database
 
@@ -115,6 +140,8 @@ Payload indexes are installed for `doc_id`, the legal hierarchy fields, law stat
    ```bash
    python snapshots.py restore snapshots/kb_docs_v1-YYYY-MM-DD-HHMMSS.snapshot
    ```
+
+   Restores automatically trigger the verification suite; the command fails if reference queries or self-hit checks regress.
 
 2. **Physical copy** – stop Qdrant and copy `~/.qdrant/storage/collections/kb_docs_v1` to another machine with the same Qdrant version.
 

@@ -286,6 +286,7 @@ class LegalCorpusBuilder:
         source_sha = _hash_text(text)
         doc_id = _article_doc_id(part_no, article_no, law_meta.last_amend_date)
         title_text = f"Статья {article_no}. {article_title}".strip()
+        relative_path = self.repository.relative_to_raw(source_path)
         return ArticleRecord(
             doc_id=doc_id,
             title_text=title_text,
@@ -293,6 +294,8 @@ class LegalCorpusBuilder:
             hierarchy=hierarchy,
             law_meta=law_meta,
             source_path=source_path,
+            source_file_name=source_path.name,
+            source_relative_path=relative_path,
             source_sha256=source_sha,
         )
 
@@ -358,7 +361,8 @@ class LegalCorpusBuilder:
                 "amendments": list(article.law_meta.amendments),
             },
             source={
-                "file_path": str(article.source_path),
+                "file_name": article.source_file_name,
+                "relative_path": article.source_relative_path,
                 "source_sha256": article.source_sha256,
             },
             chunk_sha256=body_sha,
@@ -393,7 +397,8 @@ class LegalCorpusBuilder:
                 "status": article.law_meta.status,
                 "amendments": list(article.law_meta.amendments),
             },
-            "source_file": str(article.source_path),
+            "source_file_name": article.source_file_name,
+            "source_relative_path": article.source_relative_path,
             "source_sha256": article.source_sha256,
             "article_text": article.article_text,
         }

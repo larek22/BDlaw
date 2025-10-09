@@ -28,6 +28,12 @@ class DummyVectorStore:
     def build_doc_id_filter(self, doc_ids):  # pragma: no cover - not used in assertions
         return doc_ids
 
+    def build_as_of_filter(self, *, status=None, as_of_start=None, as_of_date=None):  # pragma: no cover - deterministic stub
+        return {"status": status, "start": as_of_start, "end": as_of_date}
+
+    def combine_filters(self, *filters):  # pragma: no cover - deterministic stub
+        return [flt for flt in filters if flt]
+
 
 class _Choice:
     def __init__(self, content: str):

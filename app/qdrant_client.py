@@ -153,7 +153,13 @@ class QdrantVectorStore:
                     field_schema=schema,
                 )
             except Exception as exc:
-                logger.debug("Payload index %s not created: %s", field, exc)
+                message = str(exc).lower()
+                if "exists" in message or "already" in message:
+                    logger.debug("Payload index %s already present", field)
+                else:
+                    logger.warning("Payload index %s not created: %s", field, exc)
+            else:
+                logger.info("Payload index ensured for field '%s'", field)
 
     def keyword_prefilter(self, query: str, limit: int = 0) -> List[str]:
         if limit <= 0:
@@ -210,6 +216,59 @@ class QdrantVectorStore:
                 rest.FieldCondition(key="doc_id", match=rest.MatchValue(value=value))
                 for value in cleaned
             ]
+        )
+
+    def build_as_of_filter(
+        self,
+        *,
+        status: Optional[str] = None,
+        as_of_start: Optional[str] = None,
+        as_of_date: Optional[str] = None,
+    ) -> Optional[rest.Filter]:
+        conditions: List[rest.FieldCondition] = []
+        if status:
+            conditions.append(
+                rest.FieldCondition(
+                    key="law_meta.status",
+                    match=rest.MatchValue(value=status),
+                )
+            )
+        if as_of_start or as_of_date:
+            range_kwargs: Dict[str, str] = {}
+            if as_of_start:
+                range_kwargs["gte"] = as_of_start
+            if as_of_date:
+                range_kwargs["lte"] = as_of_date
+            conditions.append(
+                rest.FieldCondition(
+                    key="law_meta.last_amend_date",
+                    range=rest.Range(**range_kwargs),
+                )
+            )
+        if not conditions:
+            return None
+        return rest.Filter(must=conditions)
+
+    def combine_filters(self, *filters: Optional[rest.Filter]) -> Optional[rest.Filter]:
+        active = [flt for flt in filters if flt is not None]
+        if not active:
+            return None
+        if len(active) == 1:
+            return active[0]
+
+        must_conditions: List = []
+        should_conditions: List = []
+        must_not_conditions: List = []
+
+        for flt in active:
+            must_conditions.extend(list(getattr(flt, "must", []) or []))
+            should_conditions.extend(list(getattr(flt, "should", []) or []))
+            must_not_conditions.extend(list(getattr(flt, "must_not", []) or []))
+
+        return rest.Filter(
+            must=must_conditions or None,
+            should=should_conditions or None,
+            must_not=must_not_conditions or None,
         )
 
     def delete_documents(self, doc_ids: Sequence[str]) -> None:

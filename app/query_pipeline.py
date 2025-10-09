@@ -98,7 +98,7 @@ class QueryPipeline:
 
     def _retrieve_sources(self, question: str, top_k: int) -> List[SourceChunk]:
         query_vector = self.embedding_client.embed_query(question)
-        filter_ = self._build_candidate_filter(question, top_k)
+        filter_ = self._build_combined_filter(question, top_k)
         body_results = self.vector_store.query(
             vector_name="body_vec",
             query_vector=query_vector,
@@ -111,39 +111,61 @@ class QueryPipeline:
             limit=max(top_k * 3, top_k + 20),
             filters=filter_,
         )
-        fused_results = self._fuse_results(body_results, title_results)
+        fused_results = self._fuse_results(
+            body_results,
+            title_results,
+            body_weight=self.settings.query.fusion_weight_body,
+            title_weight=self.settings.query.fusion_weight_title,
+            rrf_k=max(1, self.settings.query.fusion_rrf_k),
+        )
         return self._hydrate_sources(fused_results[:top_k])
 
-    def _build_candidate_filter(self, question: str, top_k: int) -> rest.Filter | None:
+    def _build_combined_filter(self, question: str, top_k: int) -> rest.Filter | None:
+        filters: List[rest.Filter] = []
         prefilter_limit = max(top_k * 5, self.settings.query.prefilter_limit)
         if prefilter_limit <= 0:
-            return None
-        doc_ids = self.vector_store.keyword_prefilter(question, prefilter_limit)
-        if not doc_ids:
-            return None
-        try:
-            return self.vector_store.build_doc_id_filter(doc_ids)
-        except ValueError:
-            return None
+            prefilter = None
+        else:
+            doc_ids = self.vector_store.keyword_prefilter(question, prefilter_limit)
+            prefilter = None
+            if doc_ids:
+                try:
+                    prefilter = self.vector_store.build_doc_id_filter(doc_ids)
+                except ValueError:
+                    prefilter = None
+        if prefilter:
+            filters.append(prefilter)
+
+        temporal_filter = self.vector_store.build_as_of_filter(
+            status=self.settings.query.status_filter,
+            as_of_start=self.settings.query.as_of_start_date,
+            as_of_date=self.settings.query.as_of_date,
+        )
+        if temporal_filter:
+            filters.append(temporal_filter)
+
+        return self.vector_store.combine_filters(*filters)
 
     def _fuse_results(
         self,
         body_results: Sequence,
         title_results: Sequence,
         *,
-        body_weight: float = 0.6,
-        title_weight: float = 0.4,
-        k: int = 60,
+        body_weight: float,
+        title_weight: float,
+        rrf_k: int,
     ) -> List:
         combined: dict[str, float] = {}
         registry: dict[str, object] = {}
         for weight, results in ((body_weight, body_results), (title_weight, title_results)):
+            if weight <= 0:
+                continue
             for rank, result in enumerate(results, start=1):
                 point_id = str(getattr(result, "id", ""))
                 if not point_id:
                     continue
                 registry[point_id] = result
-                combined[point_id] = combined.get(point_id, 0.0) + weight / (k + rank)
+                combined[point_id] = combined.get(point_id, 0.0) + weight * (1.0 / (rrf_k + rank))
         sorted_ids = sorted(combined.items(), key=lambda item: item[1], reverse=True)
         return [registry[point_id] for point_id, _ in sorted_ids]
 
