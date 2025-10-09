@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import logging
-import uuid
-from typing import Iterable, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
 
-from .chunker import Chunk
+from .legal_types import ChunkRecord
 from .settings import AppSettings
 
 logger = logging.getLogger(__name__)
@@ -16,7 +15,6 @@ _EMBEDDING_DIMENSIONS: dict[str, int] = {
     "text-embedding-3-large": 3072,
     "text-embedding-3-small": 1536,
 }
-
 
 class QdrantVectorStore:
     def __init__(self, settings: AppSettings) -> None:
@@ -63,7 +61,7 @@ class QdrantVectorStore:
     def ensure_collection(self, embedding_model: str, recreate: bool = False) -> None:
         collection = self.collection_name
         vector_size = _vector_size_for_model(embedding_model)
-        vectors_config = rest.VectorParams(size=vector_size, distance=rest.Distance.COSINE)
+        vectors_config = _make_vector_config(vector_size)
 
         if recreate:
             logger.info(
@@ -73,6 +71,7 @@ class QdrantVectorStore:
                 collection_name=collection,
                 vectors_config=vectors_config,
             )
+            self._ensure_payload_indexes()
             return
 
         try:
@@ -80,111 +79,122 @@ class QdrantVectorStore:
         except Exception:
             info = None
 
-        current_size: Optional[int] = None
-        if info and getattr(info, "config", None):
-            params = getattr(info.config, "params", None)
-            vectors = getattr(params, "vectors", None)
-            if hasattr(vectors, "size"):
-                current_size = getattr(vectors, "size")
-            elif isinstance(vectors, dict):
-                size = vectors.get("size")
-                if isinstance(size, int):
-                    current_size = size
-
-        if current_size == vector_size:
+        if not info:
             logger.info(
-                "Collection %s already matches dimension %d", collection, vector_size
+                "Collection %s missing; creating with dimension %d", collection, vector_size
             )
+            self._client.recreate_collection(
+                collection_name=collection,
+                vectors_config=vectors_config,
+            )
+            self._ensure_payload_indexes()
             return
 
-        if current_size is not None and current_size != vector_size:
+        if not _collection_matches(info, vector_size):
             logger.warning(
-                "Collection %s dimension %s differs from %s; recreating",
-                collection,
-                current_size,
-                vector_size,
+                "Collection %s schema differs from expected; recreating", collection
             )
+            self._client.recreate_collection(
+                collection_name=collection,
+                vectors_config=vectors_config,
+            )
+            self._ensure_payload_indexes()
         else:
-            logger.info(
-                "Collection %s missing; creating with dimension %d",
-                collection,
-                vector_size,
-            )
+            self._ensure_payload_indexes()
 
-        self._client.recreate_collection(
-            collection_name=collection,
-            vectors_config=vectors_config,
-        )
+    def _ensure_payload_indexes(self) -> None:
+        collection = self.collection_name
+        keyword = _payload_schema("keyword")
+        text = _payload_schema("text")
+        index_specs = [
+            ("doc_id", keyword),
+            ("hierarchy.article_no", keyword),
+            ("hierarchy.chapter_no", keyword),
+            ("hierarchy.section_roman", keyword),
+            ("law_meta.status", keyword),
+            ("law_meta.last_amend_date", keyword),
+            ("title_text", text),
+            ("body_text", text),
+        ]
+        for field, schema in index_specs:
+            try:
+                self._client.create_payload_index(
+                    collection_name=collection,
+                    field_name=field,
+                    field_schema=schema,
+                )
+            except Exception as exc:
+                logger.debug("Payload index %s not created: %s", field, exc)
+
+    def delete_documents(self, doc_ids: Sequence[str]) -> None:
+        doc_ids = [doc_id for doc_id in doc_ids if doc_id]
+        if not doc_ids:
+            return
+        conditions = [
+            rest.FieldCondition(key="doc_id", match=rest.MatchValue(value=doc_id))
+            for doc_id in doc_ids
+        ]
+        flt = rest.Filter(should=conditions)
+        try:
+            selector = getattr(rest, "FilterSelector", None)
+            if selector is None:
+                raise AttributeError("FilterSelector is not available in qdrant_client models")
+            self._client.delete(
+                collection_name=self.collection_name,
+                points_selector=selector(filter=flt),
+                wait=True,
+            )
+        except Exception:
+            logger.exception("Failed to delete documents %s", doc_ids)
+            raise
 
     def upsert_chunks(
         self,
-        chunks: Iterable[Chunk],
-        vectors: List[List[float]],
-        *,
-        embedding_model: str,
-        chunk_size: int,
-        chunk_overlap: int,
+        chunks: Sequence[ChunkRecord],
+        title_vectors: Dict[str, List[float]],
+        body_vectors: Dict[str, List[float]],
     ) -> None:
-        chunk_list = list(chunks)
-        if len(chunk_list) != len(vectors):
-            raise ValueError(
-                f"Chunk/vector length mismatch: received {len(chunk_list)} chunks "
-                f"and {len(vectors)} vectors"
-            )
-
-        expected_dim = _vector_size_for_model(embedding_model)
-        if vectors:
-            actual_dim = len(vectors[0])
-            if actual_dim != expected_dim:
-                raise ValueError(
-                    f"Embedding dimension mismatch: expected {expected_dim} "
-                    f"(model={embedding_model}) but received {actual_dim}"
-                )
-
+        if not chunks:
+            return
+        expected_dim = len(next(iter(body_vectors.values()))) if body_vectors else 0
         batch_size = max(1, self.settings.qdrant.upsert_batch_size)
         points: List[rest.PointStruct] = []
-        for chunk, vector in zip(chunk_list, vectors):
+        for chunk in chunks:
+            title_vector = title_vectors.get(chunk.title_sha256)
+            body_vector = body_vectors.get(chunk.body_sha256)
+            if title_vector is None or body_vector is None:
+                raise ValueError(
+                    f"Missing vectors for chunk {chunk.chunk_id} (title/body)"
+                )
+            if expected_dim and len(body_vector) != expected_dim:
+                raise ValueError("Body vector dimension mismatch")
             payload = {
                 "doc_id": chunk.doc_id,
-                "path": chunk.path,
-                "page": chunk.page,
+                "chunk_id": chunk.chunk_id,
                 "chunk_index": chunk.chunk_index,
-                "offset": chunk.offset,
-                "sha": chunk.sha,
-                "text": chunk.text,
+                "title_text": chunk.title_text,
+                "body_text": chunk.body_text,
+                "hierarchy": chunk.hierarchy,
+                "law_meta": chunk.law_meta,
+                "source": chunk.source,
+                "chunk_sha256": chunk.chunk_sha256,
+                "title_sha256": chunk.title_sha256,
+                "body_sha256": chunk.body_sha256,
             }
-            points.append(
-                rest.PointStruct(
-                    id=_make_point_id(
-                        chunk,
-                        embedding_model=embedding_model,
-                        chunk_size=chunk_size,
-                        chunk_overlap=chunk_overlap,
-                    ),
-                    vector=vector,
-                    payload=payload,
-                )
+            point = rest.PointStruct(
+                id=chunk.chunk_id,
+                vector={
+                    "title_vec": title_vector,
+                    "body_vec": body_vector,
+                },
+                payload=payload,
             )
+            points.append(point)
             if len(points) >= batch_size:
                 self._upsert_batch(points, expected_dim)
                 points = []
         if points:
             self._upsert_batch(points, expected_dim)
-
-    def point_id_for_chunk(
-        self,
-        chunk: Chunk,
-        *,
-        embedding_model: str,
-        chunk_size: int,
-        chunk_overlap: int,
-    ) -> str:
-        return _make_point_id(
-            chunk,
-            embedding_model=embedding_model,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-        )
 
     def _upsert_batch(self, points: List[rest.PointStruct], vector_dim: int) -> None:
         logger.info(
@@ -213,12 +223,29 @@ class QdrantVectorStore:
             raise
         return int(getattr(response, "count", 0))
 
-    def search(self, query_vector: List[float], top_k: int) -> List[rest.ScoredPoint]:
+    def search(
+        self,
+        vector_name: str,
+        query_vector: List[float],
+        limit: int,
+        *,
+        filters: rest.Filter | None = None,
+    ) -> List[rest.ScoredPoint]:
         return self._client.search(
             collection_name=self.collection_name,
             query_vector=query_vector,
-            limit=top_k,
+            vector_name=vector_name,
+            limit=limit,
             with_payload=True,
+            filter=filters,
+        )
+
+    def build_keyword_filter(self, query: str) -> rest.Filter:
+        return rest.Filter(
+            should=[
+                rest.FieldCondition(key="title_text", match=rest.MatchText(text=query)),
+                rest.FieldCondition(key="body_text", match=rest.MatchText(text=query)),
+            ]
         )
 
     def test_connection(self) -> bool:
@@ -232,26 +259,35 @@ class QdrantVectorStore:
         return _vector_size_for_model(model)
 
 
-def _make_point_id(
-    chunk: Chunk,
-    *,
-    embedding_model: str,
-    chunk_size: int,
-    chunk_overlap: int,
-) -> str:
-    """Create a deterministic UUID point id for the provided chunk."""
+def _make_vector_config(vector_size: int):
+    try:
+        return rest.VectorParamsMap(
+            {
+                "title_vec": rest.VectorParams(size=vector_size, distance=rest.Distance.COSINE),
+                "body_vec": rest.VectorParams(size=vector_size, distance=rest.Distance.COSINE),
+            }
+        )
+    except AttributeError:
+        return {
+            "title_vec": rest.VectorParams(size=vector_size, distance=rest.Distance.COSINE),
+            "body_vec": rest.VectorParams(size=vector_size, distance=rest.Distance.COSINE),
+        }
 
-    source = "|".join(
-        [
-            chunk.path,
-            str(chunk.chunk_index),
-            chunk.sha,
-            embedding_model,
-            str(chunk_size),
-            str(chunk_overlap),
-        ]
-    )
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, source))
+
+def _collection_matches(info: object, expected_size: int) -> bool:
+    params = getattr(getattr(info, "config", None), "params", None)
+    vectors = getattr(params, "vectors", None)
+    if not vectors:
+        return False
+    try:
+        items = vectors.items()
+    except AttributeError:
+        items = [(None, vectors)]
+    for _, vector in items:
+        size = getattr(vector, "size", None)
+        if size != expected_size:
+            return False
+    return True
 
 
 def _vector_size_for_model(model: str) -> int:
@@ -269,3 +305,12 @@ def _mask_api_key(key: Optional[str]) -> str:
     if len(key) <= 4:
         return "***"
     return f"{key[:2]}...{key[-2:]}"
+
+
+def _payload_schema(name: str):
+    schema_enum = getattr(rest, "PayloadSchemaType", None)
+    if schema_enum is None:
+        return name.lower()
+    value = getattr(schema_enum, name.upper(), None)
+    return value if value is not None else name.lower()
+

@@ -9,12 +9,19 @@ from app.settings import AppSettings
 
 class DummyEmbeddingClient:
     def embed_query(self, text: str) -> list[float]:
-        return [0.0]
+        return [0.0, 0.0, 0.0]
 
 
 class DummyVectorStore:
-    def search(self, vector: list[float], top_k: int):
+    def __init__(self) -> None:
+        self.search_calls: list[tuple[str, int]] = []
+
+    def search(self, *, vector_name: str, query_vector: list[float], limit: int, filters=None):
+        self.search_calls.append((vector_name, limit))
         return []
+
+    def build_keyword_filter(self, query: str):  # pragma: no cover - not used in assertions
+        return query
 
 
 class _Choice:

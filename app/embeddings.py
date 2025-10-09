@@ -95,18 +95,25 @@ class EmbeddingClient:
         model = self.settings.openai_models.embedding
         vectors: List[EmbeddingResult | None] = [None] * len(texts)
         pending_indices: List[int] = []
+        unique_pending: dict[str, List[int]] = {}
+        unique_payload: dict[str, str] = {}
 
         for idx, (text, sha) in enumerate(zip(texts, shas)):
             cached = self._cache.get(sha, model)
             if cached is not None:
                 vectors[idx] = EmbeddingResult(sha=sha, vector=cached)
-            else:
-                pending_indices.append(idx)
+                continue
+            pending_indices.append(idx)
+            if sha not in unique_pending:
+                unique_pending[sha] = []
+                unique_payload[sha] = text
+            unique_pending[sha].append(idx)
 
-        if pending_indices:
-            for start in range(0, len(pending_indices), batch_size):
-                batch_indices = pending_indices[start : start + batch_size]
-                payload = [texts[i] for i in batch_indices]
+        if unique_pending:
+            pending_shas = list(unique_pending.keys())
+            for start in range(0, len(pending_shas), batch_size):
+                batch_shas = pending_shas[start : start + batch_size]
+                payload = [unique_payload[sha] for sha in batch_shas]
                 retry = 0
                 while True:
                     try:
@@ -128,11 +135,11 @@ class EmbeddingClient:
                         )
                         time.sleep(sleep_for)
                 data = response.data
-                for item, idx in zip(data, batch_indices):
-                    sha = shas[idx]
+                for sha, item in zip(batch_shas, data):
                     vector = item.embedding
                     self._cache.set(sha, model, vector)
-                    vectors[idx] = EmbeddingResult(sha=sha, vector=vector)
+                    for idx in unique_pending[sha]:
+                        vectors[idx] = EmbeddingResult(sha=sha, vector=vector)
 
         return [v for v in vectors if v is not None]
 

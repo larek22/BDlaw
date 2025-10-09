@@ -86,9 +86,10 @@ class QueryWorker(QObject):
                     "sources": [
                         {
                             "doc_id": source.chunk.doc_id,
-                            "page": source.chunk.page,
                             "chunk_index": source.chunk.chunk_index,
-                            "text": source.chunk.text,
+                            "title": source.chunk.title_text,
+                            "body": source.chunk.body_text,
+                            "hierarchy": source.chunk.hierarchy,
                             "score": source.score,
                         }
                         for source in result.sources
@@ -318,13 +319,20 @@ class QueryTab(QWidget):
         terms = set(word.lower() for word in re.findall(r"\w+", query))
         html_parts = []
         for idx, source in enumerate(sources, start=1):
-            text = source.get("text", "")
-            highlighted = self._highlight_terms(text, terms)
-            page = source.get("page")
-            location = f"p.{page}" if page else f"chunk {source.get('chunk_index')}"
+            body_text = source.get("body", "")
+            highlighted = self._highlight_terms(body_text, terms)
+            hierarchy = source.get("hierarchy", {}) or {}
+            trail_parts = []
+            if hierarchy.get("part_no"):
+                trail_parts.append(f"Part {hierarchy['part_no']}")
+            if hierarchy.get("article_no"):
+                trail_parts.append(f"Article {hierarchy['article_no']}")
+            location = " · ".join(trail_parts) if trail_parts else f"chunk {source.get('chunk_index')}"
             doc_id = html.escape(source.get("doc_id", ""))
+            title = html.escape(source.get("title", ""))
+            header = title or location
             html_parts.append(
-                f"<p><b>[{idx}] {doc_id} ({location})</b><br>{highlighted}</p>"
+                f"<p><b>[{idx}] {doc_id} — {header}</b><br>{highlighted}</p>"
             )
         self.sources_browser.setHtml("".join(html_parts))
 

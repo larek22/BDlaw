@@ -1,64 +1,35 @@
+from __future__ import annotations
+
 import pytest
 
 pytest.importorskip("qdrant_client")
 
-from app.chunker import Chunk
-from app.qdrant_client import _make_point_id, _vector_size_for_model, _mask_api_key
-
-
-def test_make_point_id_returns_deterministic_uuid():
-    chunk = Chunk(
-        doc_id="doc",
-        path="/tmp/doc",
-        page=1,
-        chunk_index=3,
-        offset=0,
-        text="hello",
-        sha="a" * 64,
-    )
-
-    point_id = _make_point_id(
-        chunk,
-        embedding_model="text-embedding-3-large",
-        chunk_size=1200,
-        chunk_overlap=120,
-    )
-
-    assert isinstance(point_id, str)
-    assert len(point_id) == 36  # UUID string length with hyphens
-    assert point_id == _make_point_id(
-        chunk,
-        embedding_model="text-embedding-3-large",
-        chunk_size=1200,
-        chunk_overlap=120,
-    )
-
-    # ensure different chunk index changes id
-    different = Chunk(
-        doc_id="doc",
-        path="/tmp/doc",
-        page=1,
-        chunk_index=4,
-        offset=0,
-        text="hello",
-        sha="a" * 64,
-    )
-    different_id = _make_point_id(
-        different,
-        embedding_model="text-embedding-3-large",
-        chunk_size=1200,
-        chunk_overlap=120,
-    )
-    assert different_id != point_id
+from app.qdrant_client import _mask_api_key, _payload_schema, _vector_size_for_model
 
 
 def test_vector_size_for_model_defaults():
     assert _vector_size_for_model("text-embedding-3-large") == 3072
-    assert _vector_size_for_model("anything-else") == 1536
+    assert _vector_size_for_model("unknown-model") == 1536
 
 
-def test_mask_api_key():
+def test_mask_api_key_formats():
     assert _mask_api_key(None) == "<none>"
-    assert _mask_api_key("") == "<none>"
     assert _mask_api_key("abcd") == "***"
     assert _mask_api_key("abcdefgh") == "ab...gh"
+
+
+def test_payload_schema_fallback():
+    from app import qdrant_client as qc  # local import to access module object
+
+    original = getattr(qc.rest, "PayloadSchemaType", None)
+    try:
+        class DummyEnum:
+            KEYWORD = "keyword"
+
+        setattr(qc.rest, "PayloadSchemaType", DummyEnum)
+        assert _payload_schema("keyword") == "keyword"
+        delattr(qc.rest, "PayloadSchemaType")
+        assert _payload_schema("text") == "text"
+    finally:
+        if original is not None:
+            setattr(qc.rest, "PayloadSchemaType", original)

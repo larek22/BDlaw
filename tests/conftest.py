@@ -1,4 +1,5 @@
 import sys
+import sys
 from types import ModuleType
 
 
@@ -71,6 +72,9 @@ def _install_stub_qdrant_client() -> None:
             self.size = size
             self.distance = distance
 
+    class VectorParamsMap(dict):
+        pass
+
     class Distance:
         COSINE = "COSINE"
 
@@ -80,9 +84,42 @@ def _install_stub_qdrant_client() -> None:
             self.vector = vector
             self.payload = payload
 
+    class FieldCondition:
+        def __init__(self, key: str, match):
+            self.key = key
+            self.match = match
+
+    class MatchValue:
+        def __init__(self, value):
+            self.value = value
+
+    class MatchText:
+        def __init__(self, text):
+            self.text = text
+
+    class Filter:
+        def __init__(self, must=None, should=None):
+            self.must = must or []
+            self.should = should or []
+
+    class FilterSelector:
+        def __init__(self, filter: Filter):
+            self.filter = filter
+
+    class PayloadSchemaType:
+        KEYWORD = "keyword"
+        TEXT = "text"
+
     models_module.VectorParams = VectorParams
+    models_module.VectorParamsMap = VectorParamsMap
     models_module.Distance = Distance
     models_module.PointStruct = PointStruct
+    models_module.FieldCondition = FieldCondition
+    models_module.MatchValue = MatchValue
+    models_module.MatchText = MatchText
+    models_module.Filter = Filter
+    models_module.FilterSelector = FilterSelector
+    models_module.PayloadSchemaType = PayloadSchemaType
 
     http_module.models = models_module
     module.http = http_module

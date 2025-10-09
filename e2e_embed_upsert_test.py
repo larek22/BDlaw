@@ -42,14 +42,23 @@ def main() -> None:
 
     print(f"Using Qdrant endpoint: {url}")
     print(f"Recreating debug collection: {test_collection} (dim={dim})")
+    vectors_config = rest.VectorParamsMap(
+        {
+            "title_vec": rest.VectorParams(size=dim, distance=rest.Distance.COSINE),
+            "body_vec": rest.VectorParams(size=dim, distance=rest.Distance.COSINE),
+        }
+    )
     client.recreate_collection(
         collection_name=test_collection,
-        vectors_config=rest.VectorParams(size=dim, distance=rest.Distance.COSINE),
+        vectors_config=vectors_config,
     )
 
-    text = "vector sanity check"
-    sha = sha256(text.encode("utf-8")).hexdigest()
-    vector = embedding_client.embed_texts([text], [sha])[0].vector
+    title_text = "debug title"
+    body_text = "vector sanity check"
+    title_sha = sha256(title_text.encode("utf-8")).hexdigest()
+    body_sha = sha256(body_text.encode("utf-8")).hexdigest()
+    title_vector = embedding_client.embed_texts([title_text], [title_sha])[0].vector
+    body_vector = embedding_client.embed_texts([body_text], [body_sha])[0].vector
 
     print("Upserting single debug point...")
     client.upsert(
@@ -57,9 +66,17 @@ def main() -> None:
         wait=True,
         points=[
             rest.PointStruct(
-                id=1,
-                vector=vector,
-                payload={"text": text},
+                id="debug-1",
+                vector={
+                    "title_vec": title_vector,
+                    "body_vec": body_vector,
+                },
+                payload={
+                    "doc_id": "debug-doc",
+                    "chunk_id": "debug-1",
+                    "title_text": title_text,
+                    "body_text": body_text,
+                },
             )
         ],
     )
@@ -72,7 +89,8 @@ def main() -> None:
     print("Performing retrieval sanity check...")
     results = client.search(
         collection_name=test_collection,
-        query_vector=vector,
+        query_vector=body_vector,
+        vector_name="body_vec",
         limit=3,
         with_payload=True,
     )

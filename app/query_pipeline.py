@@ -6,8 +6,8 @@ from typing import Iterable, List, Sequence
 
 from openai import OpenAI, OpenAIError, PermissionDeniedError
 
-from .chunker import Chunk
 from .embeddings import EmbeddingClient
+from .legal_types import ChunkRecord
 from .qdrant_client import QdrantVectorStore
 from .settings import AppSettings
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SourceChunk:
-    chunk: Chunk
+    chunk: ChunkRecord
     score: float
 
 
@@ -39,18 +39,37 @@ class QueryPipeline:
         lines = []
         for idx, source in enumerate(sources, start=1):
             chunk = source.chunk
-            location = f"p.{chunk.page}" if chunk.page else f"chunk {chunk.chunk_index}"
+            hierarchy = chunk.hierarchy or {}
+            trail = []
+            if hierarchy.get("part_no"):
+                trail.append(f"Part {hierarchy['part_no']}")
+            if hierarchy.get("article_no"):
+                trail.append(f"Article {hierarchy['article_no']}")
+            header = chunk.title_text or ", ".join(trail)
             lines.append(
-                f"[{idx}] {chunk.doc_id} ({location}): {chunk.text}"
+                f"[{idx}] {header}\n{chunk.body_text}"
             )
-        return "\n".join(lines)
+        return "\n\n".join(lines)
 
     def answer(self, question: str, top_k: int | None = None) -> QueryResponse:
         top_k = top_k or self.settings.query.top_k
         query_vector = self.embedding_client.embed_query(question)
-        search_results = self.vector_store.search(query_vector, top_k)
+        keyword_filter = self.vector_store.build_keyword_filter(question)
+        body_results = self.vector_store.search(
+            vector_name="body_vec",
+            query_vector=query_vector,
+            limit=max(top_k * 5, top_k + 20),
+            filters=keyword_filter,
+        )
+        title_results = self.vector_store.search(
+            vector_name="title_vec",
+            query_vector=query_vector,
+            limit=max(top_k * 3, top_k + 10),
+            filters=keyword_filter,
+        )
 
-        sources, _ = self._hydrate_sources(search_results)
+        fused_results = self._fuse_results(body_results, title_results)
+        sources = self._hydrate_sources(fused_results[:top_k])
         context = self._format_context(sources)
         prompt = (
             "You are a helpful assistant. Answer strictly using the provided context. "
@@ -87,27 +106,53 @@ class QueryPipeline:
 
         limit = max(1, top_k or self.settings.query.top_k)
         query_vector = self.embedding_client.embed_query(question)
-        search_results = self.vector_store.search(query_vector, limit)
-        sources, _ = self._hydrate_sources(search_results)
-        return sources
+        search_results = self.vector_store.search(
+            vector_name="body_vec",
+            query_vector=query_vector,
+            limit=limit,
+        )
+        return self._hydrate_sources(search_results)
 
-    def _hydrate_sources(self, results: Iterable) -> tuple[List[SourceChunk], List[Chunk]]:
+    def _fuse_results(
+        self,
+        body_results: Sequence,
+        title_results: Sequence,
+        *,
+        body_weight: float = 0.6,
+        title_weight: float = 0.4,
+        k: int = 60,
+    ) -> List:
+        combined: dict[str, float] = {}
+        registry: dict[str, object] = {}
+        for weight, results in ((body_weight, body_results), (title_weight, title_results)):
+            for rank, result in enumerate(results, start=1):
+                point_id = str(getattr(result, "id", ""))
+                if not point_id:
+                    continue
+                registry[point_id] = result
+                combined[point_id] = combined.get(point_id, 0.0) + weight / (k + rank)
+        sorted_ids = sorted(combined.items(), key=lambda item: item[1], reverse=True)
+        return [registry[point_id] for point_id, _ in sorted_ids]
+
+    def _hydrate_sources(self, results: Iterable) -> List[SourceChunk]:
         sources: List[SourceChunk] = []
-        chunks: List[Chunk] = []
         for result in results:
             payload = result.payload or {}
-            chunk = Chunk(
+            chunk = ChunkRecord(
                 doc_id=payload.get("doc_id", ""),
-                path=payload.get("path", ""),
-                page=payload.get("page"),
                 chunk_index=payload.get("chunk_index", 0),
-                offset=payload.get("offset", 0),
-                text=payload.get("text", ""),
-                sha=payload.get("sha", ""),
+                chunk_id=payload.get("chunk_id", ""),
+                title_text=payload.get("title_text", ""),
+                body_text=payload.get("body_text", ""),
+                hierarchy=payload.get("hierarchy", {}),
+                law_meta=payload.get("law_meta", {}),
+                source=payload.get("source", {}),
+                chunk_sha256=payload.get("chunk_sha256", ""),
+                title_sha256=payload.get("title_sha256", ""),
+                body_sha256=payload.get("body_sha256", ""),
             )
-            sources.append(SourceChunk(chunk=chunk, score=getattr(result, "score", 0.0)))
-            chunks.append(chunk)
-        return sources, chunks
+            sources.append(SourceChunk(chunk=chunk, score=float(getattr(result, "score", 0.0) or 0.0)))
+        return sources
 
     def _get_chat_model(self) -> str:
         if self._chat_model:

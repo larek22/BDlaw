@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Iterable, List, Sequence
+from typing import TYPE_CHECKING, Callable, Dict, List, Sequence
 
-from .chunker import Chunk, chunk_document
+from .data_repository import DataRepository
+from .legal_pipeline import LegalCorpusBuilder, ProcessedDocument, normalize_text
+from .legal_types import ChunkRecord
 from .settings import AppSettings
 from .qdrant_client import QdrantVectorStore
 
@@ -30,15 +32,18 @@ class IngestService:
         embedding_client: "EmbeddingClient",
         vector_store: QdrantVectorStore,
         reader_factory: "DocumentReaderFactory" | None = None,
+        repository: DataRepository | None = None,
     ) -> None:
         self.settings = settings
         self.embedding_client = embedding_client
         self.vector_store = vector_store
+        self.repository = repository or DataRepository()
         if reader_factory is None:
             from .readers.factory import DocumentReaderFactory  # local import to avoid optional deps at import time
 
             reader_factory = DocumentReaderFactory()
         self.reader_factory = reader_factory
+        self.builder = LegalCorpusBuilder(self.repository)
 
     def ingest(
         self,
@@ -60,8 +65,8 @@ class IngestService:
             level=logging.INFO,
         )
 
-        documents: List[tuple[Path, List[Chunk]]] = []
         skipped = 0
+        processed_documents: List[ProcessedDocument] = []
 
         for path in paths:
             try:
@@ -73,25 +78,41 @@ class IngestService:
                     progress_cb(message)
                 skipped += 1
                 continue
-            chunks = chunk_document(document, chunk_size, overlap)
-            if not chunks:
-                report(
-                    f"No chunks produced for {path.name}; skipping",
-                    level=logging.WARNING,
-                )
-                skipped += 1
-                continue
+            normalized = normalize_text(document.full_text)
+            processed = self.builder.process_document(
+                document,
+                normalized_text=normalized,
+                chunk_size=chunk_size,
+                overlap=overlap,
+            )
             report(
-                f"Parsed {path.name} -> {len(chunks)} chunk(s)",
+                f"Parsed {path.name}: {len(processed.articles)} article(s), {len(processed.chunks)} chunk(s)",
                 level=logging.INFO,
             )
-            documents.append((path, chunks))
+            if processed.doc_ids_changed:
+                report(
+                    "Changed doc ids: " + ", ".join(processed.doc_ids_changed),
+                    level=logging.INFO,
+                )
+            if processed.doc_ids_unchanged:
+                report(
+                    "Unchanged doc ids: " + ", ".join(processed.doc_ids_unchanged),
+                    level=logging.INFO,
+                )
+            processed_documents.append(processed)
 
-        all_chunks: List[Chunk] = []
-        for _, chunks in documents:
-            all_chunks.extend(chunks)
+        changed_chunks: List[ChunkRecord] = []
+        changed_doc_ids: set[str] = set()
+        unchanged_doc_ids: set[str] = set()
+        for processed in processed_documents:
+            changed_doc_ids.update(processed.doc_ids_changed)
+            unchanged_doc_ids.update(processed.doc_ids_unchanged)
+            changed_set = set(processed.doc_ids_changed)
+            for chunk in processed.chunks:
+                if chunk.doc_id in changed_set:
+                    changed_chunks.append(chunk)
 
-        if not all_chunks:
+        if not changed_chunks:
             return IngestStats(files_processed=0, chunks_created=0, skipped=skipped)
 
         embedding_model = self.settings.openai_models.embedding
@@ -101,51 +122,60 @@ class IngestService:
         )
         self.vector_store.ensure_collection(embedding_model=embedding_model, recreate=recreate)
 
+        if changed_doc_ids:
+            report(
+                f"Deleting {len(changed_doc_ids)} document id(s) prior to upsert",
+                level=logging.INFO,
+            )
+            self.vector_store.delete_documents(sorted(changed_doc_ids))
+
         report(
-            f"Embedding {len(all_chunks)} chunk(s) produced from {len(documents)} file(s)",
+            f"Embedding {len(changed_chunks)} chunk(s) from {len(processed_documents)} file(s)",
             level=logging.INFO,
         )
 
-        sample_chunk = all_chunks[0]
-        preview = sample_chunk.text.replace("\n", " ").strip()
+        sample_chunk = changed_chunks[0]
+        preview = sample_chunk.body_text.replace("\n", " ").strip()
         if len(preview) > 120:
             preview = preview[:117] + "..."
         report(
-            f"Sample chunk: doc={sample_chunk.doc_id} index={sample_chunk.chunk_index} sha={sample_chunk.sha[:12]} preview='{preview}'",
+            f"Sample chunk: doc={sample_chunk.doc_id} index={sample_chunk.chunk_index} sha={sample_chunk.chunk_sha256[:12]} preview='{preview}'",
             level=logging.INFO,
-        )
-
-        sample_point_id = self.vector_store.point_id_for_chunk(
-            sample_chunk,
-            embedding_model=embedding_model,
-            chunk_size=chunk_size,
-            chunk_overlap=overlap,
         )
         report(
-            f"Sample point id (first chunk): {sample_point_id}",
+            f"Sample point id (first chunk): {sample_chunk.chunk_id}",
             level=logging.INFO,
         )
 
-        texts = [chunk.text for chunk in all_chunks]
-        shas = [chunk.sha for chunk in all_chunks]
-        embeddings = self.embedding_client.embed_texts(texts, shas)
+        title_texts = [chunk.title_text for chunk in changed_chunks]
+        title_shas = [chunk.title_sha256 for chunk in changed_chunks]
+        body_texts = [chunk.body_text for chunk in changed_chunks]
+        body_shas = [chunk.body_sha256 for chunk in changed_chunks]
 
-        sha_to_vector = {result.sha: result.vector for result in embeddings}
-        vectors = [sha_to_vector[chunk.sha] for chunk in all_chunks]
-        vector_dim = len(vectors[0]) if vectors else 0
+        title_embeddings = self.embedding_client.embed_texts(title_texts, title_shas)
+        body_embeddings = self.embedding_client.embed_texts(body_texts, body_shas)
+
+        title_vectors: Dict[str, List[float]] = {
+            result.sha: result.vector for result in title_embeddings
+        }
+        body_vectors: Dict[str, List[float]] = {
+            result.sha: result.vector for result in body_embeddings
+        }
+
+        vector_dim = len(next(iter(body_vectors.values()))) if body_vectors else 0
         expected_dim = self.vector_store.vector_size_for_model(embedding_model)
-        if vectors and vector_dim != expected_dim:
+        if body_vectors and vector_dim != expected_dim:
             raise ValueError(
                 f"Embedding dimension mismatch: expected {expected_dim} from {embedding_model} "
                 f"but received {vector_dim}"
             )
         report(
-            f"[UPSERT] collection={self.vector_store.collection_name} points={len(vectors)} dim={vector_dim}",
+            f"[UPSERT] collection={self.vector_store.collection_name} points={len(changed_chunks)} dim={vector_dim}",
             level=logging.INFO,
         )
         logger.debug(
             "Preparing %d point(s) for collection %s on %s",
-            len(vectors),
+            len(changed_chunks),
             self.vector_store.collection_name,
             self.vector_store.endpoint_url,
         )
@@ -166,11 +196,9 @@ class IngestService:
 
         try:
             self.vector_store.upsert_chunks(
-                all_chunks,
-                vectors,
-                embedding_model=embedding_model,
-                chunk_size=chunk_size,
-                chunk_overlap=overlap,
+                changed_chunks,
+                title_vectors=title_vectors,
+                body_vectors=body_vectors,
             )
         except Exception:
             logger.exception("Failed to upsert vectors to Qdrant")
@@ -199,9 +227,14 @@ class IngestService:
                 level=logging.INFO,
             )
 
-        if vectors:
+        if changed_chunks and body_vectors:
             try:
-                verify_hits = self.vector_store.search(vectors[0], top_k=1)
+                sample_vector = body_vectors[changed_chunks[0].body_sha256]
+                verify_hits = self.vector_store.search(
+                    vector_name="body_vec",
+                    query_vector=sample_vector,
+                    limit=1,
+                )
             except Exception as exc:
                 message = f"[VERIFY] sample search failed: {exc}"
                 logger.warning(message)
@@ -222,7 +255,7 @@ class IngestService:
                     report("[VERIFY] sample search returned no hits", level=logging.WARNING)
 
         return IngestStats(
-            files_processed=len(documents),
-            chunks_created=len(all_chunks),
+            files_processed=len(processed_documents),
+            chunks_created=len(changed_chunks),
             skipped=skipped,
         )
