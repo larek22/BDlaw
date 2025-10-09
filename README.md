@@ -25,6 +25,17 @@ Vector KB Assistant is a desktop application built with PySide6 that lets you in
 
 ### Installation
 
+The project pins all runtime dependencies to reproducible versions. The most critical ones are:
+
+| Package | Version |
+| --- | --- |
+| `qdrant-client` | 1.9.1 |
+| `httpx` | 0.27.0 |
+| `openai` | 1.30.1 |
+| `pydantic` | 2.8.2 |
+
+At runtime the app logs the detected Qdrant server version, the `qdrant-client` version above, and the active embedding model so the environment is always auditable.
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # Windows: .\.venv\Scripts\activate
@@ -50,9 +61,11 @@ The first launch creates a configuration directory at `~/.vector_kb` containing 
 1. Open the **Settings** tab to review model names, Qdrant settings, and chunking parameters. Save any changes and optionally run the OpenAI/Qdrant tests.
 * When targeting **Qdrant Cloud**, set the Qdrant URL to the HTTPS endpoint (for example, `https://<cluster-id>.cloud.qdrant.io`) and paste the API key provided by Qdrant. The app enforces the API key for HTTPS endpoints, refuses to send it to `http://localhost`, and logs the exact host that will be used (`Using Qdrant endpoint: ...`).
    * The collection is automatically created (or recreated) with the correct vector dimension for the configured embedding model. If you switch models, re-run ingestion with **Rebuild Collection** enabled so the schema matches the new embedding size.
+   * Query settings expose both the `Top K` result size and a `Prefilter limit`, which controls how many document ids are gathered via full-text search before the dual vector searches run.
 2. Switch to the **Ingest** tab, add documents, choose whether to rebuild the collection, and click **Create Vector DB**. Progress appears in the log pane.
    * Ingestion normalises text into `data/staging/<corpus>/<part>/*.normalized.txt`, extracts article metadata into `*.articles.jsonl`, and writes chunk manifests under `data/chunks/.../*.chunks.jsonl` for deterministic refreshes.
    * Each article version receives a document id such as `gkrf:part3:art1110:v2024-08-08`; re-ingesting unchanged versions is idempotent, while changed versions are deleted and re-upserted by doc id.
+   * After every batch upsert the log shows the updated Qdrant point count, the delta versus the previous run, and a verification search so you can confirm vectors are persisted.
 3. After ingestion, go to the **Ask** tab, enter a question, and click **Search & Answer**. Answers include citations, and sources display highlighted query terms.
 
 ## Troubleshooting
@@ -94,14 +107,13 @@ Payload indexes are installed for `doc_id`, the legal hierarchy fields, law stat
 1. **Snapshot (recommended)**
 
    ```bash
-   curl -X POST http://localhost:6333/collections/kb_docs_v1/snapshots
+   python snapshots.py create
    ```
 
-   Copy the produced file into the project’s `snapshots/` directory for safekeeping. Restore with:
+   The script calls `create_snapshot` then downloads the file into `snapshots/` (or a path provided via `--output`). Restore with:
 
    ```bash
-   curl -X POST "http://localhost:6333/collections/kb_docs_v1/snapshots/upload" \
-        -F "snapshot=@snapshots/kb_docs_v1-YYYY-MM-DD.snapshot"
+   python snapshots.py restore snapshots/kb_docs_v1-YYYY-MM-DD-HHMMSS.snapshot
    ```
 
 2. **Physical copy** – stop Qdrant and copy `~/.qdrant/storage/collections/kb_docs_v1` to another machine with the same Qdrant version.
@@ -118,14 +130,16 @@ pytest
 
 Application logs are written to `~/.vector_kb/app.log` and streamed into the GUI log view during ingestion and queries.
 
-## Qdrant verification helpers
+## Verification & diagnostics helpers
 
 Two helper scripts are provided in the project root:
 
 - `python debug_qdrant.py` prints the configured collections and the current point count for `kb_docs_v1`. It honours the values saved in the app settings and optional `QDRANT_URL`, `QDRANT_API_KEY`, and `QDRANT_COLLECTION` environment overrides.
 - `python e2e_embed_upsert_test.py` recreates a scratch collection named `<collection>_debug`, uploads a single freshly generated embedding, verifies the count reaches 1, and performs a retrieval sanity check (limit 3). This is an easy way to confirm your OpenAI credentials, embedding dimension, and Qdrant endpoint all work together outside the GUI.
+- `python search_api.py "your question" --pretty` runs the hybrid retrieval pipeline (keyword prefilter + dual named vectors) and prints the top-ranked chunks without invoking the chat model.
+- `python verify.py` executes the end-to-end smoke checks described in the playbook: reference legal queries, self-hit tests for random articles, and empty-collection detection. The command exits with a non-zero status if any check fails.
 
-Both scripts log the endpoint in use so you can confirm that Cloud URLs are respected.
+All scripts log the endpoint in use so you can confirm that Cloud URLs are respected and that the pinned dependency versions are active.
 
 ## License
 

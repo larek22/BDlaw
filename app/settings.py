@@ -43,6 +43,7 @@ class IngestSettings:
 @dataclass
 class QuerySettings:
     top_k: int = 10
+    prefilter_limit: int = 400
 
 
 @dataclass

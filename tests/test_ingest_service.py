@@ -67,7 +67,7 @@ class DummyVectorStore:
     def upsert_chunks(self, chunks: Iterable[ChunkRecord], title_vectors, body_vectors) -> None:
         self.upserted = list(chunks)
 
-    def search(self, *, vector_name: str, query_vector: List[float], limit: int, filters=None) -> List[SimpleNamespace]:
+    def query(self, *, vector_name: str, query_vector: List[float], limit: int, filters=None) -> List[SimpleNamespace]:
         results: List[SimpleNamespace] = []
         if self.upserted:
             chunk = self.upserted[0]
@@ -92,8 +92,11 @@ class DummyVectorStore:
             )
         return results[:limit]
 
-    def build_keyword_filter(self, query: str):  # pragma: no cover - not used in dummy assertions
-        return query
+    def keyword_prefilter(self, query: str, limit: int) -> List[str]:  # pragma: no cover - not used
+        return []
+
+    def build_doc_id_filter(self, doc_ids: Iterable[str]):  # pragma: no cover - not used
+        return list(doc_ids)
 
 
 def test_ingest_writes_chunks_and_logs_progress(tmp_path: Path) -> None:

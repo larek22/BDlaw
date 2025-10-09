@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Optional, Sequence
 
-from qdrant_client import QdrantClient
+import httpx
+from qdrant_client import QdrantClient, __version__ as qdrant_client_version
 from qdrant_client.http import models as rest
 
 from .legal_types import ChunkRecord
@@ -32,13 +33,16 @@ class QdrantVectorStore:
 
         self._endpoint_url = url
 
+        self._api_key: Optional[str] = None
         if url.startswith("https://"):
             if not api_key:
                 raise ValueError("Qdrant API key is required for HTTPS endpoints")
             client_kwargs["api_key"] = api_key
+            self._api_key = api_key
         elif url.startswith("http://"):
             if "localhost" not in url and "127.0.0.1" not in url and api_key:
                 client_kwargs["api_key"] = api_key
+                self._api_key = api_key
         else:
             raise ValueError(f"Unsupported Qdrant URL: {url}")
 
@@ -49,6 +53,13 @@ class QdrantVectorStore:
         )
 
         self._client = QdrantClient(**client_kwargs)
+        self._server_version = self._fetch_server_version()
+        logger.info(
+            "Qdrant runtime: client=%s server=%s embedding_model=%s",
+            qdrant_client_version,
+            self._server_version or "<unknown>",
+            settings.openai_models.embedding,
+        )
 
     @property
     def collection_name(self) -> str:
@@ -57,6 +68,14 @@ class QdrantVectorStore:
     @property
     def endpoint_url(self) -> str:
         return self._endpoint_url
+
+    @property
+    def server_version(self) -> Optional[str]:
+        return self._server_version
+
+    @property
+    def client(self) -> QdrantClient:
+        return self._client
 
     def ensure_collection(self, embedding_model: str, recreate: bool = False) -> None:
         collection = self.collection_name
@@ -70,6 +89,8 @@ class QdrantVectorStore:
             self._client.recreate_collection(
                 collection_name=collection,
                 vectors_config=vectors_config,
+                hnsw_config=_make_hnsw_config(),
+                optimizers_config=_make_optimizer_config(),
             )
             self._ensure_payload_indexes()
             return
@@ -97,6 +118,8 @@ class QdrantVectorStore:
             self._client.recreate_collection(
                 collection_name=collection,
                 vectors_config=vectors_config,
+                hnsw_config=_make_hnsw_config(),
+                optimizers_config=_make_optimizer_config(),
             )
             self._ensure_payload_indexes()
         else:
@@ -125,6 +148,63 @@ class QdrantVectorStore:
                 )
             except Exception as exc:
                 logger.debug("Payload index %s not created: %s", field, exc)
+
+    def keyword_prefilter(self, query: str, limit: int = 0) -> List[str]:
+        if limit <= 0:
+            return []
+        filter_ = self.build_keyword_filter(query)
+        seen: set[str] = set()
+        doc_ids: List[str] = []
+        offset = None
+        remaining = limit
+        while remaining > 0:
+            batch_limit = min(128, remaining)
+            try:
+                points, offset = self._client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=filter_,
+                    limit=batch_limit,
+                    offset=offset,
+                    with_payload=True,
+                )
+            except Exception as exc:
+                logger.warning("Keyword prefilter failed: %s", exc)
+                return []
+            if not points:
+                break
+            for point in points:
+                payload = point.payload or {}
+                doc_id = payload.get("doc_id")
+                if doc_id and doc_id not in seen:
+                    seen.add(str(doc_id))
+                    doc_ids.append(str(doc_id))
+                    remaining -= 1
+                    if remaining <= 0:
+                        break
+            if not offset:
+                break
+        return doc_ids
+
+    def build_doc_id_filter(self, doc_ids: Sequence[str]) -> rest.Filter:
+        cleaned = [doc_id for doc_id in doc_ids if doc_id]
+        if not cleaned:
+            raise ValueError("doc_ids must not be empty")
+        match_any = getattr(rest, "MatchAny", None)
+        if match_any is not None:
+            return rest.Filter(
+                must=[
+                    rest.FieldCondition(
+                        key="doc_id",
+                        match=match_any(any=cleaned),
+                    )
+                ]
+            )
+        return rest.Filter(
+            should=[
+                rest.FieldCondition(key="doc_id", match=rest.MatchValue(value=value))
+                for value in cleaned
+            ]
+        )
 
     def delete_documents(self, doc_ids: Sequence[str]) -> None:
         doc_ids = [doc_id for doc_id in doc_ids if doc_id]
@@ -223,22 +303,25 @@ class QdrantVectorStore:
             raise
         return int(getattr(response, "count", 0))
 
-    def search(
+    def query(
         self,
         vector_name: str,
-        query_vector: List[float],
+        query_vector: Sequence[float],
         limit: int,
         *,
         filters: rest.Filter | None = None,
     ) -> List[rest.ScoredPoint]:
-        return self._client.search(
+        response = self._client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vector,
-            vector_name=vector_name,
+            query=list(query_vector),
+            query_filter=filters,
+            using=vector_name,
             limit=limit,
             with_payload=True,
-            filter=filters,
+            with_vectors=False,
         )
+        points = getattr(response, "points", response)
+        return list(points)
 
     def build_keyword_filter(self, query: str) -> rest.Filter:
         return rest.Filter(
@@ -247,6 +330,14 @@ class QdrantVectorStore:
                 rest.FieldCondition(key="body_text", match=rest.MatchText(text=query)),
             ]
         )
+
+    def _fetch_server_version(self) -> Optional[str]:
+        base = _normalise_base_url(self._endpoint_url)
+        for path in ("/version", "/telemetry", "/readyz", "/healthz"):
+            candidate = _safe_request(f"{base}{path}", self._api_key)
+            if candidate:
+                return candidate
+        return None
 
     def test_connection(self) -> bool:
         try:
@@ -272,6 +363,14 @@ def _make_vector_config(vector_size: int):
             "title_vec": rest.VectorParams(size=vector_size, distance=rest.Distance.COSINE),
             "body_vec": rest.VectorParams(size=vector_size, distance=rest.Distance.COSINE),
         }
+
+
+def _make_hnsw_config() -> rest.HnswConfigDiff:
+    return rest.HnswConfigDiff(m=64, ef_construct=512)
+
+
+def _make_optimizer_config() -> rest.OptimizersConfigDiff:
+    return rest.OptimizersConfigDiff(memmap_threshold=20000)
 
 
 def _collection_matches(info: object, expected_size: int) -> bool:
@@ -324,4 +423,52 @@ def _payload_schema(name: str):
         return name.lower()
     value = getattr(schema_enum, name.upper(), None)
     return value if value is not None else name.lower()
+
+
+def _extract_version_from_json(data: object) -> Optional[str]:
+    if isinstance(data, dict):
+        if "version" in data and isinstance(data["version"], str):
+            return data["version"]
+        telemetry = data.get("result")
+        if isinstance(telemetry, dict):
+            version = telemetry.get("app", {}).get("version")
+            if isinstance(version, str):
+                return version
+        app = data.get("app")
+        if isinstance(app, dict):
+            version = app.get("version")
+            if isinstance(version, str):
+                return version
+    return None
+
+
+def _fetch_json(response: httpx.Response) -> Optional[str]:
+    try:
+        data = response.json()
+    except ValueError:
+        text = response.text.strip()
+        return text[:120] if text else None
+    return _extract_version_from_json(data)
+
+
+def _normalise_base_url(url: str) -> str:
+    return url.rstrip("/")
+
+
+def _build_headers(api_key: Optional[str]) -> Dict[str, str]:
+    if not api_key:
+        return {}
+    return {"api-key": api_key}
+
+
+def _safe_request(url: str, api_key: Optional[str]) -> Optional[str]:
+    headers = _build_headers(api_key)
+    try:
+        response = httpx.get(url, headers=headers, timeout=5.0)
+        response.raise_for_status()
+    except Exception as exc:
+        logger.debug("Failed to query %s: %s", url, exc)
+        return None
+    return _fetch_json(response)
+
 

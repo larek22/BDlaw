@@ -14,14 +14,19 @@ class DummyEmbeddingClient:
 
 class DummyVectorStore:
     def __init__(self) -> None:
-        self.search_calls: list[tuple[str, int]] = []
+        self.query_calls: list[tuple[str, int]] = []
+        self.prefilter_calls: list[tuple[str, int]] = []
 
-    def search(self, *, vector_name: str, query_vector: list[float], limit: int, filters=None):
-        self.search_calls.append((vector_name, limit))
+    def query(self, *, vector_name: str, query_vector: list[float], limit: int, filters=None):
+        self.query_calls.append((vector_name, limit))
         return []
 
-    def build_keyword_filter(self, query: str):  # pragma: no cover - not used in assertions
-        return query
+    def keyword_prefilter(self, query: str, limit: int) -> list[str]:
+        self.prefilter_calls.append((query, limit))
+        return []
+
+    def build_doc_id_filter(self, doc_ids):  # pragma: no cover - not used in assertions
+        return doc_ids
 
 
 class _Choice:

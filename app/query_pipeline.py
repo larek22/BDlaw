@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Iterable, List, Sequence
 
 from openai import OpenAI, OpenAIError, PermissionDeniedError
+from qdrant_client.http import models as rest
 
 from .embeddings import EmbeddingClient
 from .legal_types import ChunkRecord
@@ -53,23 +54,7 @@ class QueryPipeline:
 
     def answer(self, question: str, top_k: int | None = None) -> QueryResponse:
         top_k = top_k or self.settings.query.top_k
-        query_vector = self.embedding_client.embed_query(question)
-        keyword_filter = self.vector_store.build_keyword_filter(question)
-        body_results = self.vector_store.search(
-            vector_name="body_vec",
-            query_vector=query_vector,
-            limit=max(top_k * 5, top_k + 20),
-            filters=keyword_filter,
-        )
-        title_results = self.vector_store.search(
-            vector_name="title_vec",
-            query_vector=query_vector,
-            limit=max(top_k * 3, top_k + 10),
-            filters=keyword_filter,
-        )
-
-        fused_results = self._fuse_results(body_results, title_results)
-        sources = self._hydrate_sources(fused_results[:top_k])
+        sources = self._retrieve_sources(question, top_k)
         context = self._format_context(sources)
         prompt = (
             "You are a helpful assistant. Answer strictly using the provided context. "
@@ -105,13 +90,41 @@ class QueryPipeline:
         """Perform a lightweight retrieval to validate search results."""
 
         limit = max(1, top_k or self.settings.query.top_k)
+        return self._retrieve_sources(question, limit)
+
+    def retrieve(self, question: str, top_k: int | None = None) -> List[SourceChunk]:
+        top_k = top_k or self.settings.query.top_k
+        return self._retrieve_sources(question, top_k)
+
+    def _retrieve_sources(self, question: str, top_k: int) -> List[SourceChunk]:
         query_vector = self.embedding_client.embed_query(question)
-        search_results = self.vector_store.search(
+        filter_ = self._build_candidate_filter(question, top_k)
+        body_results = self.vector_store.query(
             vector_name="body_vec",
             query_vector=query_vector,
-            limit=limit,
+            limit=max(top_k * 5, top_k + 40),
+            filters=filter_,
         )
-        return self._hydrate_sources(search_results)
+        title_results = self.vector_store.query(
+            vector_name="title_vec",
+            query_vector=query_vector,
+            limit=max(top_k * 3, top_k + 20),
+            filters=filter_,
+        )
+        fused_results = self._fuse_results(body_results, title_results)
+        return self._hydrate_sources(fused_results[:top_k])
+
+    def _build_candidate_filter(self, question: str, top_k: int) -> rest.Filter | None:
+        prefilter_limit = max(top_k * 5, self.settings.query.prefilter_limit)
+        if prefilter_limit <= 0:
+            return None
+        doc_ids = self.vector_store.keyword_prefilter(question, prefilter_limit)
+        if not doc_ids:
+            return None
+        try:
+            return self.vector_store.build_doc_id_filter(doc_ids)
+        except ValueError:
+            return None
 
     def _fuse_results(
         self,

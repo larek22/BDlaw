@@ -1,5 +1,4 @@
 import sys
-import sys
 from types import ModuleType
 
 
@@ -42,6 +41,7 @@ def _install_stub_qdrant_client() -> None:
         return
 
     module = ModuleType("qdrant_client")
+    module.__version__ = "0.0-test"
 
     class _StubQdrantClient:
         def __init__(self, *args, **kwargs) -> None:  # pragma: no cover
@@ -61,6 +61,27 @@ def _install_stub_qdrant_client() -> None:
 
         def search(self, *args, **kwargs):  # pragma: no cover
             raise NotImplementedError
+
+        def query_points(self, *args, **kwargs):  # pragma: no cover
+            raise NotImplementedError
+
+        def scroll(self, *args, **kwargs):  # pragma: no cover
+            return ([], None)
+
+        def create_payload_index(self, *args, **kwargs):  # pragma: no cover
+            return None
+
+        def delete(self, *args, **kwargs):  # pragma: no cover
+            return None
+
+        def create_snapshot(self, *args, **kwargs):  # pragma: no cover
+            return type("Snapshot", (), {"name": "stub.snapshot"})()
+
+        def download_snapshot(self, *args, **kwargs):  # pragma: no cover
+            return None
+
+        def upload_snapshot(self, *args, **kwargs):  # pragma: no cover
+            return None
 
     module.QdrantClient = _StubQdrantClient
 
@@ -110,6 +131,18 @@ def _install_stub_qdrant_client() -> None:
         KEYWORD = "keyword"
         TEXT = "text"
 
+    class MatchAny:
+        def __init__(self, any):
+            self.any = any
+
+    class HnswConfigDiff:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class OptimizersConfigDiff:
+        def __init__(self, *args, **kwargs):
+            pass
+
     models_module.VectorParams = VectorParams
     models_module.VectorParamsMap = VectorParamsMap
     models_module.Distance = Distance
@@ -120,6 +153,9 @@ def _install_stub_qdrant_client() -> None:
     models_module.Filter = Filter
     models_module.FilterSelector = FilterSelector
     models_module.PayloadSchemaType = PayloadSchemaType
+    models_module.MatchAny = MatchAny
+    models_module.HnswConfigDiff = HnswConfigDiff
+    models_module.OptimizersConfigDiff = OptimizersConfigDiff
 
     http_module.models = models_module
     module.http = http_module
@@ -129,5 +165,32 @@ def _install_stub_qdrant_client() -> None:
     sys.modules["qdrant_client.http.models"] = models_module
 
 
+def _install_stub_httpx() -> None:
+    if "httpx" in sys.modules:
+        return
+
+    module = ModuleType("httpx")
+
+    class _Response:
+        def __init__(self) -> None:
+            self._json = {}
+            self.text = ""
+            self.headers = {"content-type": "application/json"}
+
+        def json(self):
+            return self._json
+
+        def raise_for_status(self):  # pragma: no cover - always succeeds
+            return None
+
+    def get(*args, **kwargs):  # pragma: no cover - deterministic stub
+        return _Response()
+
+    module.get = get
+    module.Response = _Response
+    sys.modules["httpx"] = module
+
+
 _install_stub_openai()
 _install_stub_qdrant_client()
+_install_stub_httpx()

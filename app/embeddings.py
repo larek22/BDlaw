@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 
 _CACHE_PATH = CONFIG_DIR / "embeddings_cache.sqlite"
 
+try:  # pragma: no cover - optional dependency for better logging
+    import tiktoken
+except Exception:  # pragma: no cover - missing optional dependency
+    tiktoken = None
+
 
 class EmbeddingCache:
     def __init__(self, path: Path = _CACHE_PATH) -> None:
@@ -115,11 +120,21 @@ class EmbeddingClient:
                 batch_shas = pending_shas[start : start + batch_size]
                 payload = [unique_payload[sha] for sha in batch_shas]
                 retry = 0
+                token_estimate = _estimate_tokens(payload, model)
                 while True:
                     try:
+                        began = time.perf_counter()
                         response = self._client.embeddings.create(
                             model=model,
                             input=payload,
+                        )
+                        elapsed = time.perf_counter() - began
+                        logger.info(
+                            "Embedded %d unique texts (model=%s tokens=%s duration=%.2fs)",
+                            len(batch_shas),
+                            model,
+                            token_estimate if token_estimate is not None else "n/a",
+                            elapsed,
                         )
                         break
                     except Exception as exc:  # pragma: no cover - network errors
@@ -149,3 +164,24 @@ class EmbeddingClient:
         if cached is not None:
             return cached
         return self.embed_texts([text], [sha])[0].vector
+
+
+def _estimate_tokens(texts: Sequence[str], model: str) -> int | None:
+    if not texts:
+        return 0
+    if tiktoken is None:
+        return None
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except Exception:  # pragma: no cover - fallback path
+        try:
+            encoding = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            return None
+    total = 0
+    for text in texts:
+        try:
+            total += len(encoding.encode(text))
+        except Exception:
+            return None
+    return total

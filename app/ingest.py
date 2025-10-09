@@ -230,7 +230,7 @@ class IngestService:
         if changed_chunks and body_vectors:
             try:
                 sample_vector = body_vectors[changed_chunks[0].body_sha256]
-                verify_hits = self.vector_store.search(
+                verify_hits = self.vector_store.query(
                     vector_name="body_vec",
                     query_vector=sample_vector,
                     limit=1,
