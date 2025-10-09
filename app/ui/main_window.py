@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 class IngestWorker(QObject):
     finished = Signal(dict)
     error = Signal(str)
+    progress = Signal(str)
 
     def __init__(self, service: IngestService, paths: Sequence[Path], recreate: bool) -> None:
         super().__init__()
@@ -50,7 +51,11 @@ class IngestWorker(QObject):
 
     def run(self) -> None:  # pragma: no cover - requires Qt thread
         try:
-            stats = self.service.ingest(self.paths, recreate=self.recreate)
+            stats = self.service.ingest(
+                self.paths,
+                recreate=self.recreate,
+                progress_cb=self.progress.emit,
+            )
             self.finished.emit(
                 {
                     "files_processed": stats.files_processed,
@@ -88,6 +93,7 @@ class QueryWorker(QObject):
                         }
                         for source in result.sources
                     ],
+                    "question": self.question,
                 }
             )
         except Exception as exc:
@@ -421,6 +427,7 @@ class MainWindow(QMainWindow):
         thread.started.connect(worker.run)
         worker.finished.connect(self._ingest_finished, Qt.QueuedConnection)
         worker.error.connect(self._ingest_error, Qt.QueuedConnection)
+        worker.progress.connect(self.ingest_tab.append_log, Qt.QueuedConnection)
         self._ingest_thread = thread
         self._ingest_worker = worker
         thread.start()
@@ -448,13 +455,14 @@ class MainWindow(QMainWindow):
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(lambda result: self._query_finished(result, question), Qt.QueuedConnection)
+        worker.finished.connect(self._query_finished, Qt.QueuedConnection)
         worker.error.connect(self._query_error, Qt.QueuedConnection)
         self._query_thread = thread
         self._query_worker = worker
         thread.start()
 
-    def _query_finished(self, result: dict, question: str) -> None:
+    def _query_finished(self, result: dict) -> None:
+        question = result.get("question", "")
         self.query_tab.display_answer(result.get("answer", ""), result.get("sources", []), question)
         self.query_tab.set_running(False)
         self._cleanup_worker("_query_thread", "_query_worker")
@@ -468,8 +476,10 @@ class MainWindow(QMainWindow):
         thread = getattr(self, thread_attr)
         worker = getattr(self, worker_attr)
         if thread:
+            current = QThread.currentThread()
             thread.quit()
-            thread.wait()
+            if thread is not current:
+                thread.wait()
             thread.deleteLater()
         if worker:
             worker.deleteLater()
