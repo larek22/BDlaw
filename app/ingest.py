@@ -82,7 +82,7 @@ class IngestService:
                 skipped += 1
                 continue
             report(
-                f"Parsed {path.name} → {len(chunks)} chunk(s)",
+                f"Parsed {path.name} -> {len(chunks)} chunk(s)",
                 level=logging.INFO,
             )
             documents.append((path, chunks))
@@ -109,9 +109,20 @@ class IngestService:
         sample_chunk = all_chunks[0]
         preview = sample_chunk.text.replace("\n", " ").strip()
         if len(preview) > 120:
-            preview = preview[:117] + "…"
+            preview = preview[:117] + "..."
         report(
             f"Sample chunk: doc={sample_chunk.doc_id} index={sample_chunk.chunk_index} sha={sample_chunk.sha[:12]} preview='{preview}'",
+            level=logging.INFO,
+        )
+
+        sample_point_id = self.vector_store.point_id_for_chunk(
+            sample_chunk,
+            embedding_model=embedding_model,
+            chunk_size=chunk_size,
+            chunk_overlap=overlap,
+        )
+        report(
+            f"Sample point id (first chunk): {sample_point_id}",
             level=logging.INFO,
         )
 
@@ -131,6 +142,12 @@ class IngestService:
         report(
             f"[UPSERT] collection={self.vector_store.collection_name} points={len(vectors)} dim={vector_dim}",
             level=logging.INFO,
+        )
+        logger.debug(
+            "Preparing %d point(s) for collection %s on %s",
+            len(vectors),
+            self.vector_store.collection_name,
+            self.vector_store.endpoint_url,
         )
 
         before_count: int | None = None
@@ -171,6 +188,16 @@ class IngestService:
                     f"[QDRANT] points added or updated in this run: {delta}",
                     level=logging.INFO,
                 )
+                if delta == 0:
+                    report(
+                        "[QDRANT] No new points detected. Existing vectors already match the ingested content."
+                        " Use 'Rebuild' to force a clean re-index if this is unexpected.",
+                        level=logging.INFO,
+                    )
+            report(
+                f"[QDRANT] collection '{self.vector_store.collection_name}' at {self.vector_store.endpoint_url} ready with {total_points} point(s)",
+                level=logging.INFO,
+            )
 
         if vectors:
             try:

@@ -32,6 +32,8 @@ class QdrantVectorStore:
             "timeout": settings.qdrant.timeout_seconds,
         }
 
+        self._endpoint_url = url
+
         if url.startswith("https://"):
             if not api_key:
                 raise ValueError("Qdrant API key is required for HTTPS endpoints")
@@ -53,6 +55,10 @@ class QdrantVectorStore:
     @property
     def collection_name(self) -> str:
         return self.settings.qdrant.collection
+
+    @property
+    def endpoint_url(self) -> str:
+        return self._endpoint_url
 
     def ensure_collection(self, embedding_model: str, recreate: bool = False) -> None:
         collection = self.collection_name
@@ -165,6 +171,21 @@ class QdrantVectorStore:
         if points:
             self._upsert_batch(points, expected_dim)
 
+    def point_id_for_chunk(
+        self,
+        chunk: Chunk,
+        *,
+        embedding_model: str,
+        chunk_size: int,
+        chunk_overlap: int,
+    ) -> str:
+        return _make_point_id(
+            chunk,
+            embedding_model=embedding_model,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+
     def _upsert_batch(self, points: List[rest.PointStruct], vector_dim: int) -> None:
         logger.info(
             "[UPSERT] collection=%s points=%d dim=%d",
@@ -247,4 +268,4 @@ def _mask_api_key(key: Optional[str]) -> str:
         return "<none>"
     if len(key) <= 4:
         return "***"
-    return f"{key[:2]}…{key[-2:]}"
+    return f"{key[:2]}...{key[-2:]}"

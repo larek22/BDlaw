@@ -203,7 +203,7 @@ class IngestTab(QWidget):
         layout = QVBoxLayout(self)
 
         button_row = QHBoxLayout()
-        self.add_files_button = QPushButton("Add Files…")
+        self.add_files_button = QPushButton("Add Files...")
         self.add_files_button.clicked.connect(self._open_file_dialog)
         button_row.addWidget(self.add_files_button)
 
@@ -287,7 +287,7 @@ class QueryTab(QWidget):
         layout = QVBoxLayout(self)
 
         self.question_input = QPlainTextEdit()
-        self.question_input.setPlaceholderText("Ask a question about the ingested documents…")
+        self.question_input.setPlaceholderText("Ask a question about the ingested documents...")
         layout.addWidget(self.question_input)
 
         self.ask_button = QPushButton("Search & Answer")
@@ -419,7 +419,7 @@ class MainWindow(QMainWindow):
             return
         file_paths = [Path(p) for p in paths]
         self.ingest_tab.set_running(True)
-        self.ingest_tab.append_log("Starting ingestion…")
+        self.ingest_tab.append_log("Starting ingestion...")
         self._cleanup_worker("_ingest_thread", "_ingest_worker")
         worker = IngestWorker(self.ingest_service, file_paths, recreate)
         thread = QThread()

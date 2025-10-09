@@ -61,4 +61,4 @@ def test_mask_api_key():
     assert _mask_api_key(None) == "<none>"
     assert _mask_api_key("") == "<none>"
     assert _mask_api_key("abcd") == "***"
-    assert _mask_api_key("abcdefgh") == "ab…gh"
+    assert _mask_api_key("abcdefgh") == "ab...gh"

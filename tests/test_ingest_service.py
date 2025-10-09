@@ -31,6 +31,7 @@ class DummyVectorStore:
     def __init__(self) -> None:
         self.points: list[tuple[object, list[float]]] = []
         self.ensure_calls: list[tuple[str, bool]] = []
+        self.endpoint_url = "http://test-qdrant"
 
     def ensure_collection(self, *, embedding_model: str, recreate: bool = False) -> None:
         self.ensure_calls.append((embedding_model, recreate))
@@ -50,6 +51,9 @@ class DummyVectorStore:
         chunk, _ = self.points[0]
         return [SimpleNamespace(payload={"doc_id": chunk.doc_id, "chunk_index": chunk.chunk_index}, score=0.5)]
 
+    def point_id_for_chunk(self, chunk, **kwargs):  # pragma: no cover - deterministic stub
+        return f"point-{chunk.chunk_index}"
+
 
 def test_ingest_emits_progress_and_verification_messages(tmp_path):
     settings = AppSettings()
@@ -68,5 +72,6 @@ def test_ingest_emits_progress_and_verification_messages(tmp_path):
     assert stats.files_processed == 1
     assert any("Embedding" in message for message in progress)
     assert any("Sample chunk" in message for message in progress)
+    assert any("Sample point id" in message for message in progress)
     assert any("total points now" in message for message in progress)
     assert any("[VERIFY]" in message for message in progress)

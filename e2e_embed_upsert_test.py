@@ -51,7 +51,7 @@ def main() -> None:
     sha = sha256(text.encode("utf-8")).hexdigest()
     vector = embedding_client.embed_texts([text], [sha])[0].vector
 
-    print("Upserting single debug point…")
+    print("Upserting single debug point...")
     client.upsert(
         collection_name=test_collection,
         wait=True,
@@ -69,7 +69,7 @@ def main() -> None:
     if count != 1:
         raise SystemExit("Debug collection count did not reach 1")
 
-    print("Performing retrieval sanity check…")
+    print("Performing retrieval sanity check...")
     results = client.search(
         collection_name=test_collection,
         query_vector=vector,
