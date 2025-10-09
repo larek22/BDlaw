@@ -4,7 +4,12 @@ import pytest
 
 pytest.importorskip("qdrant_client")
 
-from app.qdrant_client import _mask_api_key, _payload_schema, _vector_size_for_model
+from app.qdrant_client import (
+    _collection_matches,
+    _mask_api_key,
+    _payload_schema,
+    _vector_size_for_model,
+)
 
 
 def test_vector_size_for_model_defaults():
@@ -33,3 +38,30 @@ def test_payload_schema_fallback():
     finally:
         if original is not None:
             setattr(qc.rest, "PayloadSchemaType", original)
+
+
+class _DummyVector:
+    def __init__(self, size: int) -> None:
+        self.size = size
+
+
+class _DummyInfo:
+    def __init__(self, vectors) -> None:
+        self.config = type("Cfg", (), {"params": type("Params", (), {"vectors": vectors})})
+
+
+def test_collection_matches_with_named_vectors():
+    vectors = {"title_vec": _DummyVector(3072), "body_vec": _DummyVector(3072)}
+    info = _DummyInfo(vectors)
+    assert _collection_matches(info, 3072)
+
+
+def test_collection_matches_rejects_single_vector():
+    info = _DummyInfo(_DummyVector(3072))
+    assert not _collection_matches(info, 3072)
+
+
+def test_collection_matches_rejects_wrong_names():
+    vectors = {"default": _DummyVector(3072)}
+    info = _DummyInfo(vectors)
+    assert not _collection_matches(info, 3072)

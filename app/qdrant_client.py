@@ -279,15 +279,26 @@ def _collection_matches(info: object, expected_size: int) -> bool:
     vectors = getattr(params, "vectors", None)
     if not vectors:
         return False
+
+    expected_names = {"title_vec", "body_vec"}
+    actual_names: set[str] = set()
+
     try:
-        items = vectors.items()
+        items = list(vectors.items())  # type: ignore[attr-defined]
     except AttributeError:
-        items = [(None, vectors)]
-    for _, vector in items:
+        # Legacy single-vector collections expose a VectorParams instance
+        # instead of a mapping. Force recreation to add named vectors.
+        return False
+
+    for name, vector in items:
+        if name is None:
+            return False
+        actual_names.add(str(name))
         size = getattr(vector, "size", None)
         if size != expected_size:
             return False
-    return True
+
+    return actual_names == expected_names
 
 
 def _vector_size_for_model(model: str) -> int:
