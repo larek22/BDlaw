@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import uuid
 
 from app.data_repository import DataRepository
 from app.legal_pipeline import LegalCorpusBuilder, normalize_text
@@ -45,3 +46,6 @@ def test_legal_corpus_builder_creates_articles(tmp_path: Path) -> None:
     first_chunk = processed.chunks[0]
     assert first_chunk.doc_id.startswith("gkrf:part")
     assert first_chunk.hierarchy["article_no"] == "10"
+    # Chunk identifiers must be UUID strings so they are valid Qdrant point IDs.
+    uuid_obj = uuid.UUID(first_chunk.chunk_id)
+    assert str(uuid_obj) == first_chunk.chunk_id

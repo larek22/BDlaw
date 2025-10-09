@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 from .data_repository import DataRepository
+from .id_utils import make_point_id
 from .legal_types import ArticleRecord, ChunkRecord, HierarchyMetadata, LawMetadata
 from .readers.base import DocumentText
 
@@ -52,8 +53,7 @@ def doc_prefix(doc_id: str) -> str:
 def make_chunk_id(doc_id: str, chunk_index: int) -> str:
     """Generate a deterministic identifier for a chunk."""
 
-    raw = f"{doc_id}|{chunk_index}"
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    return make_point_id(doc_id, chunk_index)
 
 
 @dataclass
