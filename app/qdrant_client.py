@@ -9,6 +9,10 @@ import httpx
 import importlib.metadata
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
+try:  # pragma: no cover - optional import varies by qdrant-client version
+    from qdrant_client.http.exceptions import ResponseHandlingException as _ResponseHandlingException
+except Exception:  # pragma: no cover - older clients
+    _ResponseHandlingException = ()
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
 from .id_utils import make_point_id
@@ -388,7 +392,7 @@ class QdrantVectorStore:
                 "doc_id": chunk.doc_id,
                 "chunk_id": point_id,
                 "chunk_index": chunk.chunk_index,
-                 "chunk_key": chunk.chunk_key,
+                "chunk_key": chunk.chunk_key,
                 "title_text": chunk.title_text,
                 "body_text": chunk.body_text,
                 "hierarchy": chunk.hierarchy,
@@ -424,7 +428,18 @@ class QdrantVectorStore:
         )
         try:
             self._commit_upsert(points)
-        except Exception:
+        except Exception as exc:
+            if len(points) > 1 and _is_timeout_error(exc):
+                split = max(1, len(points) // 2)
+                logger.warning(
+                    "Upsert timed out for %d points; retrying as batches of %d and %d",
+                    len(points),
+                    split,
+                    len(points) - split,
+                )
+                self._upsert_batch(points[:split], vector_dim)
+                self._upsert_batch(points[split:], vector_dim)
+                return
             logger.exception("Failed to upsert batch with %d points", len(points))
             raise
 
@@ -823,6 +838,30 @@ class QdrantVectorStore:
 
     def vector_size_for_model(self, model: str) -> int:
         return _vector_size_for_model(model)
+
+
+def _is_timeout_error(exc: Exception | None) -> bool:
+    if exc is None:
+        return False
+    timeout_types = (httpx.TimeoutException,)
+    if _ResponseHandlingException:
+        timeout_types = timeout_types + tuple(
+            _ResponseHandlingException
+            if isinstance(_ResponseHandlingException, tuple)
+            else (_ResponseHandlingException,)
+        )
+    if isinstance(exc, timeout_types):
+        return "timeout" in str(exc).lower()
+    message = str(exc).lower()
+    if "timeout" in message:
+        return True
+    cause = getattr(exc, "__cause__", None)
+    if cause and _is_timeout_error(cause):
+        return True
+    context = getattr(exc, "__context__", None)
+    if context and _is_timeout_error(context):
+        return True
+    return False
 
 
 def _make_vector_config(vector_size: int):
