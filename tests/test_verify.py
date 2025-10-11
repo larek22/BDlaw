@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from verify import _check_reference_queries
+from verify import _check_reference_queries, _record_total_count
 
 
 class DummyPipeline:
@@ -35,3 +35,17 @@ def test_reference_query_failure_uses_available_expectations():
     assert info  # other queries skipped
     assert any("исключительное право" in failure for failure in failures)
     assert any("gkrf:part4:art1229" in failure for failure in failures)
+
+
+def test_record_total_count_success():
+    ok, message = _record_total_count(total_points=10, expected_points=10)
+
+    assert ok is True
+    assert "matches" in message
+
+
+def test_record_total_count_mismatch_warning():
+    ok, message = _record_total_count(total_points=12, expected_points=10)
+
+    assert ok is False
+    assert "mismatch" in message

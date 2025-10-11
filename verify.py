@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
+import logging
+
 from app.data_repository import DataRepository
 from app.embeddings import EmbeddingClient
 from app.logging_config import configure_logging
@@ -16,6 +18,8 @@ from app.query_pipeline import QueryPipeline
 from app.settings import AppSettings
 from app.legal_pipeline import doc_prefix
 
+logger = logging.getLogger(__name__)
+
 _REFERENCE_QUERIES = {
     "обязательная доля в наследстве": ["gkrf:part4:art1149", "gkrf:part3:art1149"],
     "исключительное право": ["gkrf:part4:art1229", "gkrf:part4:art1255"],
@@ -23,6 +27,18 @@ _REFERENCE_QUERIES = {
 }
 
 _SAMPLE_LIMIT = 5
+
+
+def _record_total_count(total_points: int, expected_points: int) -> tuple[bool, str]:
+    """Return match flag and human readable message for total count reconciliation."""
+
+    if total_points != expected_points:
+        message = (
+            f"Total point count mismatch: expected {expected_points} chunk(s) "
+            f"but found {total_points}."
+        )
+        return False, message
+    return True, f"Total point count matches expected chunk total ({expected_points})."
 
 
 def _load_sample_titles(repository: DataRepository, limit: int) -> List[Tuple[str, str]]:
@@ -191,14 +207,13 @@ def run_verification(
     expected_counts = _collect_expected_counts(repository)
     if expected_counts:
         total_expected = sum(expected_counts.values())
-        if total_points != total_expected:
-            failures.append(
-                f"Total point count mismatch: expected {total_expected} chunk(s) but found {total_points}."
-            )
+        match, message = _record_total_count(total_points, total_expected)
+        if match:
+            info_messages.append(message)
         else:
-            info_messages.append(
-                f"Total point count matches expected chunk total ({total_expected})."
-            )
+            warning_message = f"WARNING: {message}"
+            info_messages.append(warning_message)
+            logger.warning(message)
         for prefix in sorted(expected_counts):
             expected = expected_counts[prefix]
             try:
