@@ -23,13 +23,17 @@ def normalize_qdrant_url(url: str | None) -> str:
 
     parsed = urlparse(candidate)
     host = parsed.hostname or "localhost"
-    port = parsed.port or 6333
-    if parsed.scheme:
-        scheme = parsed.scheme
-    else:
-        scheme = "https" if host.endswith(".qdrant.io") else "http"
+    scheme = parsed.scheme or ("https" if host.endswith(".qdrant.io") else "http")
 
-    netloc = f"{host}:{port}"
+    # Always coerce Qdrant traffic through the canonical HTTP port.  Qdrant Cloud
+    # listeners forward 443 → 6333, so we normalise every endpoint to include the
+    # explicit port to avoid ``/aliases`` 404s from hitting the management plane.
+    port = 6333
+    if ":" in host and not host.startswith("["):
+        host_fmt = f"[{host}]"
+    else:
+        host_fmt = host
+    netloc = f"{host_fmt}:{port}"
     return urlunparse((scheme, netloc, "", "", "", ""))
 
 

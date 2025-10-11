@@ -494,23 +494,28 @@ class QdrantVectorStore:
     def _swap_alias(
         self, alias: str, new_collection: str, previous: Optional[str]
     ) -> bool:
-        operations = [
-            rest.ChangeAliasesOperation(
-                create_alias=rest.CreateAlias(
-                    alias_name=alias, collection_name=new_collection
-                )
-            )
+        operations: List[dict[str, dict[str, str]]] = [
+            {"create_alias": {"alias_name": alias, "collection_name": new_collection}}
         ]
         if previous and previous != new_collection:
             operations.append(
-                rest.ChangeAliasesOperation(
-                    delete_alias=rest.DeleteAlias(alias_name=alias)
-                )
+                {
+                    "delete_alias": {
+                        "alias_name": alias,
+                        "collection_name": previous,
+                    }
+                }
             )
+
         try:
-            self._client.update_collection_aliases(
-                change_aliases_operations=operations
-            )
+            if hasattr(self._client, "update_aliases"):
+                self._client.update_aliases(
+                    change_aliases_operations=operations
+                )
+            else:
+                self._client.update_collection_aliases(
+                    change_aliases_operations=operations
+                )
         except Exception as exc:
             logger.warning(
                 "Failed to update alias %s -> %s: %s. Using direct collection writes.",
@@ -520,6 +525,7 @@ class QdrantVectorStore:
             )
             self._write_collection_name = new_collection
             return False
+
         logger.info("Alias %s now points to collection %s", alias, new_collection)
         self._write_collection_name = self._alias_name
         return True
