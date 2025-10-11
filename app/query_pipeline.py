@@ -174,17 +174,20 @@ class QueryPipeline:
         for result in results:
             payload = result.payload or {}
             chunk = ChunkRecord(
-                doc_id=payload.get("doc_id", ""),
-                chunk_index=payload.get("chunk_index", 0),
-                chunk_id=payload.get("chunk_id", ""),
-                title_text=payload.get("title_text", ""),
-                body_text=payload.get("body_text", ""),
-                hierarchy=payload.get("hierarchy", {}),
-                law_meta=payload.get("law_meta", {}),
-                source=payload.get("source", {}),
-                chunk_sha256=payload.get("chunk_sha256", ""),
-                title_sha256=payload.get("title_sha256", ""),
-                body_sha256=payload.get("body_sha256", ""),
+                doc_id=str(payload.get("doc_id", "") or ""),
+                chunk_index=int(payload.get("chunk_index", 0) or 0),
+                chunk_id=str(payload.get("chunk_id", "") or ""),
+                title_text=str(payload.get("title_text", "") or ""),
+                body_text=str(payload.get("body_text", "") or ""),
+                hierarchy=payload.get("hierarchy") or {},
+                law_meta=payload.get("law_meta") or {},
+                source=payload.get("source") or {},
+                chunk_key=str(payload.get("chunk_key", "") or ""),
+                plan_version=str(payload.get("plan_version", "unknown") or "unknown"),
+                parser_version=str(payload.get("parser_version", "unknown") or "unknown"),
+                chunk_sha256=str(payload.get("chunk_sha256", "") or ""),
+                title_sha256=str(payload.get("title_sha256", "") or ""),
+                body_sha256=str(payload.get("body_sha256", "") or ""),
             )
             sources.append(SourceChunk(chunk=chunk, score=float(getattr(result, "score", 0.0) or 0.0)))
         return sources

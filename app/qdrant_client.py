@@ -37,6 +37,7 @@ class QdrantVectorStore:
         client_kwargs: dict[str, object] = {
             "url": url,
             "timeout": settings.qdrant.timeout_seconds,
+            "prefer_grpc": False,
         }
 
         self._endpoint_url = url

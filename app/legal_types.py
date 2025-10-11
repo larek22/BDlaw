@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List
@@ -43,18 +41,20 @@ class ArticleRecord:
 
 @dataclass
 class ChunkRecord:
+    """Normalized chunk representation exchanged between pipeline components."""
+
     doc_id: str
     chunk_index: int
-    chunk_id: str
-    chunk_key: str
-    title_text: str
-    body_text: str
-    hierarchy: Dict[str, object]
-    law_meta: Dict[str, object]
-    source: Dict[str, object]
-    plan_version: str
-    parser_version: str
-    chunk_sha256: str
-    title_sha256: str
-    body_sha256: str
+    chunk_id: str = ""
+    title_text: str = ""
+    body_text: str = ""
+    hierarchy: Dict[str, object] = field(default_factory=dict)
+    law_meta: Dict[str, object] = field(default_factory=dict)
+    source: Dict[str, object] = field(default_factory=dict)
+    chunk_key: str = ""
+    plan_version: str = "unknown"
+    parser_version: str = "unknown"
+    chunk_sha256: str = ""
+    title_sha256: str = ""
+    body_sha256: str = ""
 

@@ -15,7 +15,10 @@ from .readers.base import DocumentText
 from .settings import AppSettings
 from .structure_planner import StructurePlan, StructurePlanner
 
-import tiktoken
+try:  # optional dependency for token-aware chunking
+    import tiktoken  # type: ignore
+except Exception:  # pragma: no cover - optional dependency not available
+    tiktoken = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -161,13 +164,19 @@ class LegalCorpusBuilder:
         self.tokenizer = self._load_tokenizer(self.settings.chunking.tokenizer)
 
     def _load_tokenizer(self, name: str):
-        try:
-            return tiktoken.get_encoding(name)
-        except Exception as exc:
+        if tiktoken is not None:
+            try:
+                return tiktoken.get_encoding(name)
+            except Exception as exc:
+                logger.warning(
+                    "Tokenizer '%s' not available; using character-count fallback (%s)",
+                    name,
+                    exc,
+                )
+        else:
             logger.warning(
-                "Tokenizer '%s' not available; using character-count fallback (%s)",
-                name,
-                exc,
+                "tiktoken not available; using character-count fallback",
+                extra={"tokenizer": name},
             )
 
             class _CharacterTokenizer:

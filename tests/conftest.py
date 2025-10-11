@@ -1,5 +1,6 @@
 import sys
 from types import ModuleType
+from typing import Any, Dict
 
 
 def _install_stub_openai() -> None:
@@ -34,6 +35,85 @@ def _install_stub_openai() -> None:
     module.OpenAIError = _StubOpenAIError
     module.PermissionDeniedError = _StubOpenAIError
     sys.modules["openai"] = module
+
+
+def _install_stub_pydantic() -> None:
+    if "pydantic" in sys.modules:
+        return
+
+    module = ModuleType("pydantic")
+
+    _UNSET = object()
+
+    class ValidationError(Exception):
+        pass
+
+    class _FieldInfo:
+        def __init__(self, default: Any = _UNSET, default_factory=None) -> None:
+            self.default = default
+            self.default_factory = default_factory
+
+    def Field(*, default: Any = _UNSET, default_factory=None):
+        return _FieldInfo(default=default, default_factory=default_factory)
+
+    class BaseModel:
+        _field_info: Dict[str, _FieldInfo] = {}
+
+        def __init_subclass__(cls, **kwargs):
+            super().__init_subclass__(**kwargs)
+            fields: Dict[str, _FieldInfo] = {}
+            annotations = getattr(cls, "__annotations__", {})
+            for name in annotations:
+                default = cls.__dict__.get(name, _UNSET)
+                if isinstance(default, _FieldInfo):
+                    fields[name] = default
+                    setattr(cls, name, _UNSET)
+                elif default is not _UNSET:
+                    fields[name] = _FieldInfo(default=default)
+                else:
+                    fields[name] = _FieldInfo()
+            cls._field_info = fields
+
+        def __init__(self, **data: Any) -> None:
+            for name, info in self._field_info.items():
+                if name in data:
+                    value = data[name]
+                else:
+                    if info.default is not _UNSET:
+                        value = info.default
+                    elif info.default_factory is not None:
+                        value = info.default_factory()
+                    else:
+                        value = None
+                setattr(self, name, value)
+
+        @classmethod
+        def model_validate(cls, data: Any):
+            if isinstance(data, cls):
+                return data
+            if not isinstance(data, dict):
+                raise ValidationError("Expected mapping for model validation")
+            return cls(**data)
+
+        def model_dump(self) -> Dict[str, Any]:
+            result: Dict[str, Any] = {}
+            for name in self._field_info:
+                value = getattr(self, name)
+                if isinstance(value, BaseModel):
+                    result[name] = value.model_dump()
+                elif isinstance(value, list):
+                    result[name] = [
+                        item.model_dump() if isinstance(item, BaseModel) else item
+                        for item in value
+                    ]
+                else:
+                    result[name] = value
+            return result
+
+    module.BaseModel = BaseModel
+    module.Field = Field
+    module.ValidationError = ValidationError
+    sys.modules["pydantic"] = module
 
 
 def _install_stub_qdrant_client() -> None:
@@ -192,5 +272,6 @@ def _install_stub_httpx() -> None:
 
 
 _install_stub_openai()
+_install_stub_pydantic()
 _install_stub_qdrant_client()
 _install_stub_httpx()
