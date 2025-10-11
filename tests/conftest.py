@@ -130,6 +130,9 @@ def _install_stub_qdrant_client() -> None:
         def recreate_collection(self, *args, **kwargs):  # pragma: no cover
             return None
 
+        def create_collection(self, *args, **kwargs):  # pragma: no cover
+            return None
+
         def get_collection(self, *args, **kwargs):  # pragma: no cover
             raise NotImplementedError
 
@@ -152,6 +155,9 @@ def _install_stub_qdrant_client() -> None:
             return None
 
         def delete(self, *args, **kwargs):  # pragma: no cover
+            return None
+
+        def delete_collection(self, *args, **kwargs):  # pragma: no cover
             return None
 
         def create_snapshot(self, *args, **kwargs):  # pragma: no cover

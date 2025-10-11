@@ -11,6 +11,9 @@ from qdrant_client.http import models as rest
 
 from .id_utils import make_point_id
 from .legal_types import ChunkRecord
+from datetime import datetime
+from typing import Tuple
+
 from .settings import AppSettings
 
 logger = logging.getLogger(__name__)
@@ -41,6 +44,11 @@ class QdrantVectorStore:
         }
 
         self._endpoint_url = url
+        self._alias_name = settings.qdrant.collection or "kb_docs_active"
+        self._allow_destructive = getattr(
+            settings, "allow_destructive_migrations", False
+        )
+        self._timeout = settings.qdrant.timeout_seconds
 
         self._api_key: Optional[str] = None
         if url.startswith("https://"):
@@ -72,7 +80,7 @@ class QdrantVectorStore:
 
     @property
     def collection_name(self) -> str:
-        return self.settings.qdrant.collection
+        return self._alias_name
 
     @property
     def endpoint_url(self) -> str:
@@ -87,69 +95,56 @@ class QdrantVectorStore:
         return self._client
 
     def ensure_collection(self, embedding_model: str, recreate: bool = False) -> None:
-        collection = self.collection_name
+        alias = self.collection_name
         vector_size = _vector_size_for_model(embedding_model)
-        vectors_config = _make_vector_config(vector_size)
 
         if recreate:
             logger.info(
-                "Recreating collection %s with dimension %d", collection, vector_size
+                "Provisioning fresh collection for alias %s with dim=%d", alias, vector_size
             )
-            self._client.recreate_collection(
-                collection_name=collection,
-                vectors_config=vectors_config,
-                hnsw_config=_make_hnsw_config(),
-                optimizers_config=_make_optimizer_config(),
-            )
-            self._ensure_payload_indexes()
+            previous = self._resolve_alias(alias)
+            new_collection = self._provision_collection(alias, vector_size)
+            self._swap_alias(alias, new_collection, previous)
+            if (
+                previous
+                and previous not in {alias, new_collection}
+                and self._allow_destructive
+            ):
+                self._delete_collection(previous)
+            self._ensure_payload_indexes(new_collection)
             return
 
-        try:
-            info = self._client.get_collection(collection_name=collection)
-        except Exception:
-            info = None
-
-        if not info:
-            logger.info(
-                "Collection %s missing; creating with dimension %d", collection, vector_size
-            )
-            self._client.recreate_collection(
-                collection_name=collection,
-                vectors_config=vectors_config,
-            )
-            self._ensure_payload_indexes()
+        current, info, alias_exists = self._current_collection_info(alias)
+        if info and _collection_matches(info, vector_size):
+            logger.debug("Collection %s already matches expected schema", current)
+            self._ensure_payload_indexes(current)
             return
 
-        if not _collection_matches(info, vector_size):
-            logger.warning(
-                "Collection %s schema differs from expected; recreating", collection
-            )
-            self._client.recreate_collection(
-                collection_name=collection,
-                vectors_config=vectors_config,
-                hnsw_config=_make_hnsw_config(),
-                optimizers_config=_make_optimizer_config(),
-            )
-            self._ensure_payload_indexes()
-        else:
-            self._ensure_payload_indexes()
+        logger.info(
+            "Creating collection for alias %s with vector dimension %d", alias, vector_size
+        )
+        new_collection = self._provision_collection(alias, vector_size)
+        previous = current if alias_exists else self._resolve_alias(alias)
+        self._swap_alias(alias, new_collection, previous)
+        if (
+            previous
+            and previous not in {alias, new_collection}
+            and self._allow_destructive
+        ):
+            self._delete_collection(previous)
+        self._ensure_payload_indexes(new_collection)
 
     def reset_collection(self, embedding_model: str) -> None:
-        collection = self.collection_name
-        vector_size = _vector_size_for_model(embedding_model)
-        logger.info(
-            "Resetting collection %s with vector dimension %d", collection, vector_size
-        )
-        try:
-            self._client.delete_collection(collection_name=collection)
-        except Exception as exc:
-            message = str(exc).lower()
-            if "not found" not in message:
-                logger.warning("Failed to delete collection %s: %s", collection, exc)
+        if not self._allow_destructive:
+            logger.info(
+                "Reset requested with destructive migrations disabled; provisioning fresh collection via alias swap."
+            )
+        else:
+            logger.info("Resetting active collection via alias rotation.")
         self.ensure_collection(embedding_model=embedding_model, recreate=True)
 
-    def _ensure_payload_indexes(self) -> None:
-        collection = self.collection_name
+    def _ensure_payload_indexes(self, collection: str | None = None) -> None:
+        collection = collection or self.collection_name
         keyword = _payload_schema("keyword")
         text = _payload_schema("text")
         index_specs = [
@@ -418,6 +413,92 @@ class QdrantVectorStore:
         except Exception:
             logger.exception("Failed to upsert batch with %d points", len(points))
             raise
+
+    def _current_collection_info(self, alias: str) -> Tuple[Optional[str], Optional[object], bool]:
+        target = self._resolve_alias(alias)
+        alias_exists = target is not None
+        lookup = target or alias
+        try:
+            info = self._client.get_collection(collection_name=lookup)
+        except Exception:
+            info = None
+        if info:
+            return lookup, info, alias_exists
+        return target, None, alias_exists
+
+    def _provision_collection(self, alias: str, vector_size: int) -> str:
+        base = f"{alias}_d{vector_size}_{datetime.utcnow():%Y%m%d_%H%M%S}"
+        candidate = base
+        suffix = 0
+        vectors_config = _make_vector_config(vector_size)
+        while True:
+            try:
+                self._client.create_collection(
+                    collection_name=candidate,
+                    vectors_config=vectors_config,
+                    hnsw_config=_make_hnsw_config(),
+                    optimizers_config=_make_optimizer_config(),
+                )
+            except Exception as exc:
+                message = str(exc).lower()
+                if "exists" in message or "already" in message:
+                    suffix += 1
+                    candidate = f"{base}_{suffix}"
+                    continue
+                logger.exception("Failed to create collection %s", candidate)
+                raise
+            logger.info("Created collection %s for alias %s", candidate, alias)
+            return candidate
+
+    def _resolve_alias(self, alias: str) -> Optional[str]:
+        base_url = _normalise_base_url(self._endpoint_url)
+        url = f"{base_url}/aliases/{alias}"
+        headers = _build_headers(self._api_key)
+        try:
+            response = httpx.get(url, headers=headers, timeout=self._timeout)
+        except Exception as exc:
+            logger.debug("Failed to resolve alias %s: %s", alias, exc)
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        if isinstance(payload, dict):
+            result = payload.get("result")
+            if isinstance(result, dict):
+                collection = result.get("collection_name") or result.get("collection")
+                if isinstance(collection, str):
+                    return collection
+        return None
+
+    def _swap_alias(self, alias: str, new_collection: str, previous: Optional[str]) -> None:
+        base_url = _normalise_base_url(self._endpoint_url)
+        url = f"{base_url}/aliases"
+        headers = _build_headers(self._api_key)
+        actions = [
+            {"create_alias": {"alias_name": alias, "collection_name": new_collection}}
+        ]
+        if previous and previous != new_collection:
+            actions.append({"delete_alias": {"alias_name": alias}})
+        payload = {"actions": actions}
+        try:
+            response = httpx.post(url, headers=headers, json=payload, timeout=self._timeout)
+            response.raise_for_status()
+        except Exception:
+            logger.exception(
+                "Failed to update alias %s to point at %s", alias, new_collection
+            )
+            raise
+        logger.info("Alias %s now points to collection %s", alias, new_collection)
+
+    def _delete_collection(self, collection: str) -> None:
+        try:
+            self._client.delete_collection(collection_name=collection)
+        except Exception as exc:
+            logger.warning("Failed to delete legacy collection %s: %s", collection, exc)
+
 
     def count_points(self) -> int:
         try:
