@@ -29,6 +29,18 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
+def _env_bool(key: str, default: bool) -> bool:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    value = value.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _env_int(key: str, default: int) -> int:
     value = os.getenv(key)
     if value is None:
@@ -73,12 +85,36 @@ class QuerySettings:
 
 
 @dataclass
+class PlannerSettings:
+    use_llm: bool = _env_bool("PLANNER_USE_LLM", True)
+    temperature: float = _env_float("PLANNER_TEMPERATURE", 0.0)
+    max_tokens: int = _env_int("PLANNER_MAX_TOKENS", 700)
+    prompt_version: str = _env_default("PLANNER_PROMPT_VERSION", "v1.0") or "v1.0"
+    sample_bytes: int = _env_int("PLANNER_SAMPLE_BYTES", 20000)
+
+
+@dataclass
+class ChunkingSettings:
+    max_tokens: int = _env_int("CHUNK_MAX_TOKENS", 900)
+    overlap_tokens: int = _env_int("CHUNK_OVERLAP_TOKENS", 120)
+    tokenizer: str = _env_default("EMBED_TOKENIZER", "cl100k_base") or "cl100k_base"
+
+
+@dataclass
+class VerificationSettings:
+    min_top1_score: float = _env_float("VERIFICATION_MIN_TOP1_SCORE", 0.25)
+
+
+@dataclass
 class AppSettings:
     openai_api_key: str = field(default_factory=lambda: _env_default("OPENAI_API_KEY", ""))
     openai_models: ModelSettings = field(default_factory=ModelSettings)
     qdrant: QdrantSettings = field(default_factory=QdrantSettings)
     ingest: IngestSettings = field(default_factory=IngestSettings)
     query: QuerySettings = field(default_factory=QuerySettings)
+    planner: PlannerSettings = field(default_factory=PlannerSettings)
+    chunking: ChunkingSettings = field(default_factory=ChunkingSettings)
+    verification: VerificationSettings = field(default_factory=VerificationSettings)
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -92,6 +128,9 @@ class AppSettings:
             qdrant=QdrantSettings(**data.get("qdrant", {})),
             ingest=IngestSettings(**data.get("ingest", {})),
             query=QuerySettings(**data.get("query", {})),
+            planner=PlannerSettings(**data.get("planner", {})),
+            chunking=ChunkingSettings(**data.get("chunking", {})),
+            verification=VerificationSettings(**data.get("verification", {})),
         )
 
     @classmethod
@@ -114,5 +153,8 @@ __all__ = [
     "QdrantSettings",
     "IngestSettings",
     "QuerySettings",
+    "PlannerSettings",
+    "ChunkingSettings",
+    "VerificationSettings",
     "CONFIG_PATH",
 ]

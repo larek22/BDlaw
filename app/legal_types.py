@@ -46,11 +46,14 @@ class ChunkRecord:
     doc_id: str
     chunk_index: int
     chunk_id: str
+    chunk_key: str
     title_text: str
     body_text: str
     hierarchy: Dict[str, object]
     law_meta: Dict[str, object]
     source: Dict[str, object]
+    plan_version: str
+    parser_version: str
     chunk_sha256: str
     title_sha256: str
     body_sha256: str

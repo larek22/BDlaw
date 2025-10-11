@@ -1,5 +1,4 @@
-from app.legal_types import ChunkRecord
-from app.query_pipeline import SourceChunk
+from types import SimpleNamespace
 
 from verify import _check_reference_queries
 
@@ -24,20 +23,8 @@ def test_reference_queries_skipped_when_expected_docs_missing():
 
 
 def test_reference_query_failure_uses_available_expectations():
-    chunk = ChunkRecord(
-        doc_id="gkrf:part4:art1283:v2006-12-18",
-        chunk_index=0,
-        chunk_id="chunk-0",
-        title_text="",
-        body_text="",
-        hierarchy={},
-        law_meta={},
-        source={},
-        chunk_sha256="body",
-        title_sha256="title",
-        body_sha256="body",
-    )
-    source = SourceChunk(chunk=chunk, score=0.5)
+    chunk = SimpleNamespace(doc_id="gkrf:part4:art1283:v2006-12-18", chunk_index=0)
+    source = SimpleNamespace(chunk=chunk, score=0.5)
     pipeline = DummyPipeline({"исключительное право": [source]})
 
     failures, info = _check_reference_queries(

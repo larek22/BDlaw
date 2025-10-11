@@ -5,11 +5,14 @@ Vector KB Assistant is a desktop application built with PySide6 that lets you in
 ## Features
 
 - Ingest PDF, DOCX, TXT, and RTF files.
-- Chunk documents with configurable size and overlap.
+- Normalise raw legal texts and plan their section/chapter/article hierarchy automatically (LLM-assisted with cached fallbacks).
+- Chunk documents with configurable size/overlap **and** tokenizer-aware windows aligned to the embedding model.
 - Cache embeddings locally to reduce repeated costs.
-- Store chunk metadata and vectors in a Qdrant collection (local or Cloud) with deterministic point IDs.
+- Store chunk metadata and vectors in a Qdrant collection (local or Cloud) with deterministic UUIDv5 point IDs and per-document
+  reconciliation to guarantee idempotent re-ingests.
 - Parse Russian legal documents into Part/Chapter/Article structures with law-aware metadata and deterministic document versions.
-- Emit dual named vectors (`title_vec`, `body_vec`) for hybrid retrieval and maintain payload indexes for law-specific filters.
+- Emit dual named vectors (`title_vec`, `body_vec`) for hybrid retrieval, maintain payload indexes for law-specific filters, and
+  persist chunk provenance including parser/plan versions and auditing keys.
 - Ask natural-language questions with answers grounded in retrieved chunks.
 - View citations and highlighted source snippets for transparency.
 - Responsive PySide6 GUI with background threads for long-running tasks.

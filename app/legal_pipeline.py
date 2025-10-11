@@ -12,6 +12,10 @@ from .data_repository import DataRepository
 from .id_utils import make_point_id
 from .legal_types import ArticleRecord, ChunkRecord, HierarchyMetadata, LawMetadata
 from .readers.base import DocumentText
+from .settings import AppSettings
+from .structure_planner import StructurePlan, StructurePlanner
+
+import tiktoken
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +54,9 @@ def doc_prefix(doc_id: str) -> str:
     return f"{head}:"
 
 
+PARSER_VERSION = "1.1.0"
+
+
 def make_chunk_id(doc_id: str, chunk_index: int) -> str:
     """Generate a deterministic identifier for a chunk."""
 
@@ -67,14 +74,19 @@ class ProcessedDocument:
     doc_ids_unchanged: List[str]
 
 
-def normalize_text(text: str) -> str:
-    cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
-    cleaned = re.sub(r"\u00a0", " ", cleaned)
-    cleaned = re.sub(r"-\n", "", cleaned)
-    cleaned = re.sub(r"\s+\n", "\n", cleaned)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
-    return cleaned.strip()
+def normalize_text(raw: str) -> str:
+    """Normalise raw document text prior to planning/parsing."""
+
+    text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\ufeff", "")  # strip BOM
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    text = re.sub(r"-\n", "", text)  # fix hyphenated breaks
+    text = re.sub(r"(?m)^\s*\d+\s*$", "", text)  # drop standalone page numbers
+    text = re.sub(r"\u00a0", " ", text)
+    text = re.sub(r"\s+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
 
 
 def _iso_date(maybe_date: str | None) -> str | None:
@@ -140,8 +152,32 @@ def _article_doc_id(part_no: int, article_no: str, last_amend_date: str | None) 
 
 
 class LegalCorpusBuilder:
-    def __init__(self, repository: DataRepository) -> None:
+    def __init__(self, repository: DataRepository, settings: AppSettings | None = None) -> None:
         self.repository = repository
+        self.settings = settings or AppSettings.load()
+        self.planner = StructurePlanner(self.settings, repository)
+        self.max_tokens = self.settings.chunking.max_tokens
+        self.overlap_tokens = self.settings.chunking.overlap_tokens
+        self.tokenizer = self._load_tokenizer(self.settings.chunking.tokenizer)
+
+    def _load_tokenizer(self, name: str):
+        try:
+            return tiktoken.get_encoding(name)
+        except Exception as exc:
+            logger.warning(
+                "Tokenizer '%s' not available; using character-count fallback (%s)",
+                name,
+                exc,
+            )
+
+            class _CharacterTokenizer:
+                def encode(self, text: str, disallowed_special=None):
+                    return [ord(ch) for ch in text]
+
+                def decode(self, tokens: List[int]) -> str:
+                    return "".join(chr(token) for token in tokens)
+
+            return _CharacterTokenizer()
 
     def process_document(
         self,
@@ -170,12 +206,22 @@ class LegalCorpusBuilder:
         normalized_path = self.repository.normalized_text_path(corpus_slug, part_slug)
         normalized_path.write_text(normalized_text, encoding="utf-8")
 
+        plan = self.planner.plan_for_text(normalized_text)
         articles = self._extract_articles(
             normalized_text=normalized_text,
             law_meta=law_meta,
             source_path=document.path,
             part_no=part_no,
+            plan=plan,
         )
+        if not articles:
+            logger.warning("Structure plan produced no articles; falling back to legacy parser")
+            articles = self._extract_articles_legacy(
+                normalized_text=normalized_text,
+                law_meta=law_meta,
+                source_path=document.path,
+                part_no=part_no,
+            )
 
         article_path = self.repository.article_json_path(corpus_slug, part_slug)
         self._write_jsonl(article_path, (self._article_to_json(article) for article in articles))
@@ -183,7 +229,12 @@ class LegalCorpusBuilder:
         chunk_records: List[ChunkRecord] = []
         for article in articles:
             chunk_records.extend(
-                self._chunk_article(article, chunk_size=chunk_size, overlap=overlap)
+                self._chunk_article(
+                    article,
+                    plan_version=plan.plan_version,
+                    max_tokens=self.max_tokens,
+                    overlap_tokens=self.overlap_tokens,
+                )
             )
 
         chunk_path = self.repository.chunk_json_path(corpus_slug, part_slug)
@@ -205,6 +256,116 @@ class LegalCorpusBuilder:
         )
 
     def _extract_articles(
+        self,
+        *,
+        normalized_text: str,
+        law_meta: LawMetadata,
+        source_path: Path,
+        part_no: int,
+        plan: StructurePlan,
+    ) -> List[ArticleRecord]:
+        compiled: Dict[str, re.Pattern[str]] = {}
+        level_order: List[str] = []
+        for level in plan.levels:
+            try:
+                compiled[level.name] = re.compile(level.regex, re.IGNORECASE)
+                level_order.append(level.name)
+            except re.error as exc:
+                logger.warning("Invalid regex for level %s: %s", level.name, exc)
+        if plan.split.primary not in compiled:
+            logger.warning("Primary split level '%s' missing from plan", plan.split.primary)
+            return []
+
+        name_to_index = {name: idx for idx, name in enumerate(level_order)}
+        state: Dict[str, str | None] = {name: None for name in level_order}
+        titles: Dict[str, str | None] = {name: None for name in level_order}
+
+        current_article_no: str | None = None
+        current_article_title: str = ""
+        current_lines: List[str] = []
+        articles: List[ArticleRecord] = []
+
+        lines = normalized_text.splitlines()
+
+        def reset_lower(level_name: str) -> None:
+            level_index = name_to_index.get(level_name, -1)
+            if level_index == -1:
+                return
+            for lower_name in level_order[level_index + 1 :]:
+                state[lower_name] = None
+                titles[lower_name] = None
+
+        def finalize_article() -> None:
+            nonlocal current_article_no, current_article_title, current_lines
+            if current_article_no is None or not current_lines:
+                return
+            hierarchy = HierarchyMetadata(
+                section_roman=state.get("section_roman"),
+                section_title=titles.get("section_roman"),
+                chapter_no=int(state["chapter_no"]) if state.get("chapter_no") else None,
+                chapter_title=titles.get("chapter_no"),
+                article_no=current_article_no,
+                article_title=current_article_title or "",
+            )
+            articles.append(
+                self._finalize_article(
+                    part_no=part_no,
+                    article_no=current_article_no,
+                    article_title=current_article_title,
+                    lines=current_lines,
+                    hierarchy=hierarchy,
+                    law_meta=law_meta,
+                    source_path=source_path,
+                )
+            )
+            current_article_no = None
+            current_article_title = ""
+            current_lines = []
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                if current_lines:
+                    current_lines.append("")
+                continue
+
+            matched_level: str | None = None
+            for level in plan.levels:
+                pattern = compiled.get(level.name)
+                if pattern is None:
+                    continue
+                match = pattern.match(stripped)
+                if not match:
+                    continue
+                matched_level = level.name
+                groupdict = match.groupdict()
+                value = groupdict.get("num")
+                if value:
+                    state[level.name] = value.strip()
+                remainder = groupdict.get("title")
+                if remainder is None:
+                    remainder = stripped[match.end():].strip()
+                if remainder:
+                    titles[level.name] = remainder.strip()
+                reset_lower(level.name)
+                if level.name == plan.split.primary:
+                    finalize_article()
+                    current_article_no = value.strip() if value else stripped
+                    current_article_title = (remainder or "").strip(" .")
+                    current_lines = [stripped]
+                else:
+                    if current_lines:
+                        current_lines.append(stripped)
+                break
+
+            if matched_level is None and current_lines is not None:
+                if current_article_no is not None:
+                    current_lines.append(stripped)
+
+        finalize_article()
+        return articles
+
+    def _extract_articles_legacy(
         self,
         normalized_text: str,
         law_meta: LawMetadata,
@@ -321,44 +482,104 @@ class LegalCorpusBuilder:
         self,
         article: ArticleRecord,
         *,
-        chunk_size: int,
-        overlap: int,
+        plan_version: str,
+        max_tokens: int,
+        overlap_tokens: int,
     ) -> List[ChunkRecord]:
         paragraphs = [p.strip() for p in article.article_text.split("\n") if p.strip()]
         if not paragraphs:
             return []
-        chunks: List[ChunkRecord] = []
-        buffer: List[str] = []
-        buffer_len = 0
-        chunk_index = 0
+
+        tokenised: List[tuple[str, List[int]]] = []
         for paragraph in paragraphs:
-            para_len = len(paragraph)
-            if buffer and buffer_len + para_len > chunk_size:
-                body = "\n".join(buffer).strip()
-                chunks.append(self._make_chunk(article, chunk_index, body))
+            tokens = self.tokenizer.encode(paragraph, disallowed_special=())
+            if tokens and len(tokens) > max_tokens:
+                for sentence in self._split_sentences(paragraph):
+                    sentence_tokens = self.tokenizer.encode(sentence, disallowed_special=())
+                    if sentence_tokens and len(sentence_tokens) > max_tokens:
+                        for chunk_tokens in self._slice_tokens(sentence_tokens, max_tokens):
+                            tokenised.append((self.tokenizer.decode(chunk_tokens).strip(), chunk_tokens))
+                    else:
+                        tokenised.append((sentence, sentence_tokens))
+            else:
+                tokenised.append((paragraph, tokens))
+
+        chunks: List[ChunkRecord] = []
+        window: List[tuple[str, List[int]]] = []
+        token_total = 0
+        chunk_index = 0
+
+        for text_piece, tokens in tokenised:
+            tokens = tokens or []
+            if window and token_total + len(tokens) > max_tokens:
+                chunks.append(
+                    self._make_chunk(
+                        article,
+                        chunk_index,
+                        window,
+                        plan_version=plan_version,
+                    )
+                )
                 chunk_index += 1
-                if overlap > 0 and body:
-                    overlap_chars = body[-overlap:]
-                    buffer = [overlap_chars]
-                    buffer_len = len(overlap_chars)
+                if overlap_tokens > 0:
+                    window, token_total = self._build_overlap(window, overlap_tokens)
                 else:
-                    buffer = []
-                    buffer_len = 0
-            buffer.append(paragraph)
-            buffer_len += para_len + 1
-        if buffer:
-            body = "\n".join(buffer).strip()
-            chunks.append(self._make_chunk(article, chunk_index, body))
+                    window = []
+                    token_total = 0
+            window.append((text_piece, tokens))
+            token_total += len(tokens)
+
+        if window:
+            chunks.append(
+                self._make_chunk(
+                    article,
+                    chunk_index,
+                    window,
+                    plan_version=plan_version,
+                )
+            )
         return chunks
 
-    def _make_chunk(self, article: ArticleRecord, chunk_index: int, body: str) -> ChunkRecord:
+    def _build_overlap(
+        self,
+        window: List[tuple[str, List[int]]],
+        overlap_tokens: int,
+    ) -> tuple[List[tuple[str, List[int]]], int]:
+        overlap: List[tuple[str, List[int]]] = []
+        total = 0
+        for text_piece, tokens in reversed(window):
+            overlap.insert(0, (text_piece, tokens))
+            total += len(tokens)
+            if total >= overlap_tokens:
+                break
+        return overlap, total
+
+    def _split_sentences(self, paragraph: str) -> List[str]:
+        sentences = re.split(r"(?<=[\.!?])\s+", paragraph)
+        return [sentence.strip() for sentence in sentences if sentence.strip()]
+
+    def _slice_tokens(self, tokens: List[int], max_tokens: int) -> List[List[int]]:
+        return [tokens[i : i + max_tokens] for i in range(0, len(tokens), max_tokens)]
+
+    def _make_chunk(
+        self,
+        article: ArticleRecord,
+        chunk_index: int,
+        window: List[tuple[str, List[int]]],
+        *,
+        plan_version: str,
+    ) -> ChunkRecord:
+        body = "\n".join(part for part, _ in window).strip()
         body_sha = _hash_text(body)
         title_sha = _hash_text(article.title_text)
         chunk_id = make_chunk_id(article.doc_id, chunk_index)
+        chunk_key = f"{article.doc_id}::{chunk_index}::{article.source_sha256[:8]}"
+        source_path = article.source_relative_path or article.source_file_name
         return ChunkRecord(
             doc_id=article.doc_id,
             chunk_index=chunk_index,
             chunk_id=chunk_id,
+            chunk_key=chunk_key,
             title_text=article.title_text,
             body_text=body,
             hierarchy={
@@ -370,6 +591,7 @@ class LegalCorpusBuilder:
                 "chapter_title": article.hierarchy.chapter_title,
                 "article_no": article.hierarchy.article_no,
                 "article_title": article.hierarchy.article_title,
+                "clause_no": None,
             },
             law_meta={
                 "law_no": article.law_meta.law_no,
@@ -381,8 +603,11 @@ class LegalCorpusBuilder:
             source={
                 "file_name": article.source_file_name,
                 "relative_path": article.source_relative_path,
+                "source_path": source_path,
                 "source_sha256": article.source_sha256,
             },
+            plan_version=plan_version,
+            parser_version=PARSER_VERSION,
             chunk_sha256=body_sha,
             title_sha256=title_sha,
             body_sha256=body_sha,
@@ -417,6 +642,7 @@ class LegalCorpusBuilder:
             },
             "source_file_name": article.source_file_name,
             "source_relative_path": article.source_relative_path,
+            "source_path": article.source_relative_path or article.source_file_name,
             "source_sha256": article.source_sha256,
             "article_text": article.article_text,
         }

@@ -51,7 +51,7 @@ class IngestService:
 
             reader_factory = DocumentReaderFactory()
         self.reader_factory = reader_factory
-        self.builder = LegalCorpusBuilder(self.repository)
+        self.builder = LegalCorpusBuilder(self.repository, settings)
 
     def ingest(
         self,
@@ -67,9 +67,18 @@ class IngestService:
 
         chunk_size = self.settings.ingest.chunk_size_chars
         overlap = self.settings.ingest.chunk_overlap_chars
+        token_size = self.settings.chunking.max_tokens
+        token_overlap = self.settings.chunking.overlap_tokens
 
         report(
-            f"Preparing ingestion for {len(paths)} file(s) (chunk_size={chunk_size} overlap={overlap})",
+            "Preparing ingestion for {count} file(s) "
+            "(chunk_size={char_size} overlap={char_overlap} tokens={token_size} token_overlap={token_overlap})".format(
+                count=len(paths),
+                char_size=chunk_size,
+                char_overlap=overlap,
+                token_size=token_size,
+                token_overlap=token_overlap,
+            ),
             level=logging.INFO,
         )
 
@@ -110,6 +119,7 @@ class IngestService:
             processed_documents.append(processed)
 
         prefix_expected_counts: Dict[str, int] = {}
+        doc_expected_counts: Dict[str, int] = {}
         changed_chunks: List[ChunkRecord] = []
         changed_doc_ids: set[str] = set()
         unchanged_doc_ids: set[str] = set()
@@ -123,6 +133,7 @@ class IngestService:
                     prefix_expected_counts[prefix] = (
                         prefix_expected_counts.get(prefix, 0) + 1
                     )
+                doc_expected_counts[chunk.doc_id] = doc_expected_counts.get(chunk.doc_id, 0) + 1
                 if chunk.doc_id in changed_set:
                     changed_chunks.append(chunk)
 
@@ -350,6 +361,41 @@ class IngestService:
                     "[QDRANT] Reconciliation OK: chunk counts match expected totals.",
                     level=logging.INFO,
                 )
+
+        if doc_expected_counts:
+            try:
+                actual_doc_counts = self.vector_store.count_points_for_doc_ids(
+                    doc_expected_counts.keys()
+                )
+            except Exception as exc:
+                message = f"Failed to count Qdrant points for updated documents: {exc}"
+                logger.error(message)
+                if progress_cb:
+                    progress_cb(message)
+                raise
+            doc_mismatches = [
+                (doc_id, doc_expected_counts[doc_id], actual_doc_counts.get(doc_id, 0))
+                for doc_id in doc_expected_counts
+                if actual_doc_counts.get(doc_id, 0) != doc_expected_counts[doc_id]
+            ]
+            if doc_mismatches:
+                sample = ", ".join(
+                    f"{doc_id} expected {expected} found {actual}"
+                    for doc_id, expected, actual in doc_mismatches[:5]
+                )
+                message = (
+                    "Document-level reconciliation failed: "
+                    + sample
+                    + (" ..." if len(doc_mismatches) > 5 else "")
+                )
+                logger.error(message)
+                if progress_cb:
+                    progress_cb(message)
+                raise RuntimeError(message)
+            report(
+                "[QDRANT] Document-level counts match expected chunk totals.",
+                level=logging.INFO,
+            )
 
         stats = IngestStats(
             files_processed=len(processed_documents),

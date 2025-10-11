@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterable, List
+from typing import Dict, Iterable, List
 
 from app.data_repository import DataRepository
 from app.ingest import IngestService
@@ -67,6 +67,13 @@ class DummyVectorStore:
 
     def count_points_with_prefix(self, prefix: str) -> int:
         return sum(1 for chunk in self.upserted if chunk.doc_id.startswith(prefix))
+
+    def count_points_for_doc_ids(self, doc_ids: Iterable[str]) -> Dict[str, int]:
+        counts: Dict[str, int] = {doc_id: 0 for doc_id in doc_ids}
+        for chunk in self.upserted:
+            if chunk.doc_id in counts:
+                counts[chunk.doc_id] += 1
+        return counts
 
     def upsert_chunks(self, chunks: Iterable[ChunkRecord], title_vectors, body_vectors) -> None:
         self.upserted = list(chunks)

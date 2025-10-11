@@ -361,29 +361,27 @@ class QdrantVectorStore:
                 )
             if expected_dim and len(body_vector) != expected_dim:
                 raise ValueError("Body vector dimension mismatch")
-            point_id = make_point_id(chunk.doc_id, chunk.chunk_index)
+            point_id = chunk.chunk_id or make_point_id(chunk.doc_id, chunk.chunk_index)
             try:
                 uuid.UUID(point_id)
             except ValueError as exc:  # pragma: no cover - defensive guard
-                raise ValueError(f"Generated invalid UUID for chunk {chunk.doc_id}:{chunk.chunk_index}") from exc
+                raise ValueError(
+                    f"Generated invalid UUID for chunk {chunk.doc_id}:{chunk.chunk_index}"
+                ) from exc
             if chunk.chunk_id != point_id:
-                logger.debug(
-                    "Normalising chunk id for %s index %d from %s to %s",
-                    chunk.doc_id,
-                    chunk.chunk_index,
-                    chunk.chunk_id,
-                    point_id,
-                )
                 chunk.chunk_id = point_id
             payload = {
                 "doc_id": chunk.doc_id,
                 "chunk_id": point_id,
                 "chunk_index": chunk.chunk_index,
+                 "chunk_key": chunk.chunk_key,
                 "title_text": chunk.title_text,
                 "body_text": chunk.body_text,
                 "hierarchy": chunk.hierarchy,
                 "law_meta": chunk.law_meta,
                 "source": chunk.source,
+                "plan_version": chunk.plan_version,
+                "parser_version": chunk.parser_version,
                 "chunk_sha256": chunk.chunk_sha256,
                 "title_sha256": chunk.title_sha256,
                 "body_sha256": chunk.body_sha256,

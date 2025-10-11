@@ -63,6 +63,11 @@ class DataRepository:
         chunk_dir.mkdir(parents=True, exist_ok=True)
         return staging_dir, chunk_dir
 
+    def plan_cache_path(self) -> Path:
+        """Return the path used to cache structure plans."""
+
+        return self.paths.staging / "plan_cache.json"
+
     def manifest_path(self, corpus_slug: str, part_slug: str) -> Path:
         staging_dir, _ = self.ensure_subdirectories(corpus_slug, part_slug)
         return staging_dir / f"{part_slug}.manifest.json"
