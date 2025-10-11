@@ -10,6 +10,13 @@ from app.qdrant_client import (
     _payload_schema,
     _vector_size_for_model,
 )
+from app.utils.net import normalize_qdrant_url
+
+
+def test_normalize_qdrant_url_port_and_scheme():
+    assert normalize_qdrant_url(None) == "http://localhost:6333"
+    assert normalize_qdrant_url("localhost") == "http://localhost:6333"
+    assert normalize_qdrant_url("https://demo.qdrant.io") == "https://demo.qdrant.io:6333"
 
 
 def test_vector_size_for_model_defaults():

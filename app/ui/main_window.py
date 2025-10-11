@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -413,19 +414,46 @@ class MainWindow(QMainWindow):
 
             text = "ping"
             sha = sha256(text.encode("utf-8")).hexdigest()
-            client.embed_texts([text], [sha])
-            QMessageBox.information(self, "OpenAI", "OpenAI connection successful")
+            began = time.perf_counter()
+            result = client.embed_texts([text], [sha])[0]
+            elapsed = time.perf_counter() - began
+            dimension = len(result.vector)
+            QMessageBox.information(
+                self,
+                "OpenAI",
+                f"OpenAI connection successful\nDimension: {dimension}\nLatency: {elapsed:.2f}s",
+            )
         except Exception as exc:
             QMessageBox.critical(self, "OpenAI", f"OpenAI test failed: {exc}")
 
     def _test_qdrant(self) -> None:
         try:
             store = QdrantVectorStore(self.settings)
-            healthy = store.test_connection()
-            if healthy:
-                QMessageBox.information(self, "Qdrant", "Qdrant connection successful")
-            else:
-                QMessageBox.warning(self, "Qdrant", "Qdrant is reachable but collection not found")
+            client = store.client
+            try:
+                collections_response = client.get_collections()
+                collections = getattr(collections_response, "collections", []) or []
+            except Exception as exc:
+                QMessageBox.critical(self, "Qdrant", f"Failed to list collections: {exc}")
+                return
+
+            alias_target = "<unset>"
+            try:
+                aliases = client.get_aliases()
+                for description in getattr(aliases, "aliases", []) or []:
+                    if getattr(description, "alias_name", None) == store.alias_name:
+                        alias_target = getattr(description, "collection_name", "<unknown>")
+                        break
+            except Exception as exc:
+                alias_target = f"alias lookup failed: {exc}"
+
+            message = (
+                f"Endpoint: {store.endpoint_url}\n"
+                f"Server version: {store.server_version or '<unknown>'}\n"
+                f"Collections discovered: {len(collections)}\n"
+                f"Alias '{store.alias_name}' → {alias_target}"
+            )
+            QMessageBox.information(self, "Qdrant", message)
         except Exception as exc:
             QMessageBox.critical(self, "Qdrant", f"Qdrant test failed: {exc}")
 

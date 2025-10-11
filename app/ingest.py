@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, List, Sequence
@@ -65,6 +66,7 @@ class IngestService:
             if progress_cb:
                 progress_cb(message)
 
+        start_time = time.perf_counter()
         chunk_size = self.settings.ingest.chunk_size_chars
         overlap = self.settings.ingest.chunk_overlap_chars
         token_size = self.settings.chunking.max_tokens
@@ -153,6 +155,8 @@ class IngestService:
                 level=logging.INFO,
             )
             self.vector_store.delete_documents(sorted(changed_doc_ids))
+
+        self.embedding_client.reset_usage()
 
         report(
             f"Embedding {len(changed_chunks)} chunk(s) from {len(processed_documents)} file(s)",
@@ -401,6 +405,23 @@ class IngestService:
             files_processed=len(processed_documents),
             chunks_created=len(changed_chunks),
             skipped=skipped,
+        )
+        usage = self.embedding_client.usage_summary()
+        elapsed = time.perf_counter() - start_time if changed_chunks else 0.0
+        report(
+            "Ingestion summary: files={files} chunks={chunks} skipped={skipped} "
+            "embed_requests={requests:.0f} cache_hits={cache:.0f} tokens={tokens:.0f} "
+            "est_cost=${cost:.4f} elapsed={elapsed:.2f}s".format(
+                files=stats.files_processed,
+                chunks=stats.chunks_created,
+                skipped=stats.skipped,
+                requests=usage["requests"],
+                cache=usage["cache_hits"],
+                tokens=usage["tokens"],
+                cost=usage["cost"],
+                elapsed=elapsed,
+            ),
+            level=logging.INFO,
         )
         if self.verify_after_ingest and stats.chunks_created > 0:
             try:

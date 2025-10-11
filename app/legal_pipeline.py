@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
@@ -48,6 +49,36 @@ _WORD_TO_NUM = {
     "пятая": 5,
     "пятой": 5,
 }
+
+
+def _date_to_int(value: str | None) -> int | None:
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.strptime(text[:10], "%Y-%m-%d")
+    except ValueError:
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) >= 8:
+            try:
+                return int(digits[:8])
+            except ValueError:
+                return None
+        return None
+    return int(dt.strftime("%Y%m%d"))
+
+
+def _maybe_int(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
 def doc_prefix(doc_id: str) -> str:
     """Return the stable prefix for a legal document identifier."""
 
@@ -66,10 +97,19 @@ def doc_prefix(doc_id: str) -> str:
 PARSER_VERSION = DEFAULT_PARSER_VERSION
 
 
-def make_chunk_id(doc_id: str, chunk_index: int) -> str:
+def make_chunk_id(
+    doc_id: str,
+    chunk_index: int,
+    *,
+    plan_version: str | None = None,
+    parser_version: str | None = None,
+) -> str:
     """Generate a deterministic identifier for a chunk."""
 
-    return make_point_id(doc_id, chunk_index)
+    version_marker = "|".join(
+        part for part in (plan_version, parser_version) if part
+    ) or None
+    return make_point_id(doc_id, chunk_index, version_marker)
 
 
 @dataclass
@@ -587,9 +627,43 @@ class LegalCorpusBuilder:
         body = "\n".join(part for part, _ in window).strip()
         body_sha = _hash_text(body)
         title_sha = _hash_text(article.title_text)
-        chunk_id = make_chunk_id(article.doc_id, chunk_index)
+        chunk_id = make_chunk_id(
+            article.doc_id,
+            chunk_index,
+            plan_version=plan_version,
+            parser_version=PARSER_VERSION,
+        )
         chunk_key = f"{article.doc_id}#c{chunk_index:04d}"
         source_path = article.source_relative_path or article.source_file_name
+        last_amend_int = _date_to_int(article.law_meta.last_amend_date)
+        enact_int = _date_to_int(article.law_meta.enact_date)
+        hierarchy_article_int = _maybe_int(article.hierarchy.article_no)
+        hierarchy_payload = {
+            "corpus": article.law_meta.corpus,
+            "part_no": article.law_meta.part_no,
+            "section_roman": article.hierarchy.section_roman,
+            "section_title": article.hierarchy.section_title,
+            "chapter_no": article.hierarchy.chapter_no,
+            "chapter_title": article.hierarchy.chapter_title,
+            "article_no": article.hierarchy.article_no,
+            "article_title": article.hierarchy.article_title,
+            "clause_no": None,
+        }
+        if hierarchy_article_int is not None:
+            hierarchy_payload["article_no_int"] = hierarchy_article_int
+
+        law_meta_payload = {
+            "law_no": article.law_meta.law_no,
+            "enact_date": article.law_meta.enact_date,
+            "last_amend_date": article.law_meta.last_amend_date,
+            "status": article.law_meta.status,
+            "amendments": list(article.law_meta.amendments),
+        }
+        if enact_int is not None:
+            law_meta_payload["enact_date_int"] = enact_int
+        if last_amend_int is not None:
+            law_meta_payload["last_amend_date_int"] = last_amend_int
+
         return ChunkRecord(
             doc_id=article.doc_id,
             chunk_index=chunk_index,
@@ -597,24 +671,8 @@ class LegalCorpusBuilder:
             chunk_key=chunk_key,
             title_text=article.title_text,
             body_text=body,
-            hierarchy={
-                "corpus": article.law_meta.corpus,
-                "part_no": article.law_meta.part_no,
-                "section_roman": article.hierarchy.section_roman,
-                "section_title": article.hierarchy.section_title,
-                "chapter_no": article.hierarchy.chapter_no,
-                "chapter_title": article.hierarchy.chapter_title,
-                "article_no": article.hierarchy.article_no,
-                "article_title": article.hierarchy.article_title,
-                "clause_no": None,
-            },
-            law_meta={
-                "law_no": article.law_meta.law_no,
-                "enact_date": article.law_meta.enact_date,
-                "last_amend_date": article.law_meta.last_amend_date,
-                "status": article.law_meta.status,
-                "amendments": list(article.law_meta.amendments),
-            },
+            hierarchy=hierarchy_payload,
+            law_meta=law_meta_payload,
             source={
                 "file_name": article.source_file_name,
                 "relative_path": article.source_relative_path,

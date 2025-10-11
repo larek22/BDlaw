@@ -86,6 +86,9 @@ class EmbeddingClient:
             raise ValueError("OpenAI API key is not set")
         self._client = OpenAI(api_key=api_key)
         self._cache = EmbeddingCache()
+        self._total_cached = 0
+        self._total_requests = 0
+        self._total_tokens = 0
 
     def embed_texts(
         self,
@@ -107,6 +110,7 @@ class EmbeddingClient:
             cached = self._cache.get(sha, model)
             if cached is not None:
                 vectors[idx] = EmbeddingResult(sha=sha, vector=cached)
+                self._total_cached += 1
                 continue
             pending_indices.append(idx)
             if sha not in unique_pending:
@@ -136,6 +140,9 @@ class EmbeddingClient:
                             token_estimate if token_estimate is not None else "n/a",
                             elapsed,
                         )
+                        self._total_requests += 1
+                        if token_estimate is not None:
+                            self._total_tokens += token_estimate
                         break
                     except Exception as exc:  # pragma: no cover - network errors
                         retry += 1
@@ -162,8 +169,23 @@ class EmbeddingClient:
         sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
         cached = self._cache.get(sha, self.settings.openai_models.embedding)
         if cached is not None:
+            self._total_cached += 1
             return cached
         return self.embed_texts([text], [sha])[0].vector
+
+    def reset_usage(self) -> None:
+        self._total_cached = 0
+        self._total_requests = 0
+        self._total_tokens = 0
+
+    def usage_summary(self) -> dict[str, float]:
+        cost = (self._total_tokens / 1_000_000) * 0.13
+        return {
+            "cache_hits": float(self._total_cached),
+            "requests": float(self._total_requests),
+            "tokens": float(self._total_tokens),
+            "cost": cost,
+        }
 
 
 def _estimate_tokens(texts: Sequence[str], model: str) -> int | None:

@@ -2,19 +2,19 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Dict, Iterator, List, Optional, Sequence, Set
+from datetime import datetime
+from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 import httpx
 import importlib.metadata
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
+from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
 from .id_utils import make_point_id
 from .legal_types import ChunkRecord
-from datetime import datetime
-from typing import Tuple
-
 from .settings import AppSettings
+from .utils.net import normalize_qdrant_url
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,8 @@ _EMBEDDING_DIMENSIONS: dict[str, int] = {
 class QdrantVectorStore:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
-        url = (settings.qdrant.url or "").strip()
+        raw_url = (settings.qdrant.url or "").strip()
+        url = normalize_qdrant_url(raw_url)
         api_key = (settings.qdrant.api_key or "").strip()
 
         if not url:
@@ -45,6 +46,7 @@ class QdrantVectorStore:
 
         self._endpoint_url = url
         self._alias_name = settings.qdrant.collection or "kb_docs_active"
+        self._write_collection_name = self._alias_name
         self._allow_destructive = getattr(
             settings, "allow_destructive_migrations", False
         )
@@ -80,6 +82,10 @@ class QdrantVectorStore:
 
     @property
     def collection_name(self) -> str:
+        return self._write_collection_name
+
+    @property
+    def alias_name(self) -> str:
         return self._alias_name
 
     @property
@@ -95,7 +101,7 @@ class QdrantVectorStore:
         return self._client
 
     def ensure_collection(self, embedding_model: str, recreate: bool = False) -> None:
-        alias = self.collection_name
+        alias = self.alias_name
         vector_size = _vector_size_for_model(embedding_model)
 
         if recreate:
@@ -104,17 +110,20 @@ class QdrantVectorStore:
             )
             previous = self._resolve_alias(alias)
             new_collection = self._provision_collection(alias, vector_size)
-            self._swap_alias(alias, new_collection, previous)
+            swapped = self._swap_alias(alias, new_collection, previous)
             if (
                 previous
                 and previous not in {alias, new_collection}
                 and self._allow_destructive
             ):
                 self._delete_collection(previous)
-            self._ensure_payload_indexes(new_collection)
+            target = alias if swapped else new_collection
+            self._ensure_payload_indexes(target)
             return
 
         current, info, alias_exists = self._current_collection_info(alias)
+        if alias_exists:
+            self._write_collection_name = self._alias_name
         if info and _collection_matches(info, vector_size):
             logger.debug("Collection %s already matches expected schema", current)
             self._ensure_payload_indexes(current)
@@ -125,14 +134,15 @@ class QdrantVectorStore:
         )
         new_collection = self._provision_collection(alias, vector_size)
         previous = current if alias_exists else self._resolve_alias(alias)
-        self._swap_alias(alias, new_collection, previous)
+        swapped = self._swap_alias(alias, new_collection, previous)
         if (
             previous
             and previous not in {alias, new_collection}
             and self._allow_destructive
         ):
             self._delete_collection(previous)
-        self._ensure_payload_indexes(new_collection)
+        target = alias if swapped else new_collection
+        self._ensure_payload_indexes(target)
 
     def reset_collection(self, embedding_model: str) -> None:
         if not self._allow_destructive:
@@ -147,13 +157,18 @@ class QdrantVectorStore:
         collection = collection or self.collection_name
         keyword = _payload_schema("keyword")
         text = _payload_schema("text")
+        integer = _payload_schema("integer")
         index_specs = [
             ("doc_id", keyword),
-            ("hierarchy.article_no", keyword),
-            ("hierarchy.chapter_no", keyword),
+            ("hierarchy.part_no", integer),
+            ("hierarchy.chapter_no", integer),
+            ("hierarchy.article_no_int", integer),
             ("hierarchy.section_roman", keyword),
             ("law_meta.status", keyword),
-            ("law_meta.last_amend_date", keyword),
+            ("law_meta.enact_date_int", integer),
+            ("law_meta.last_amend_date_int", integer),
+            ("law_meta.date_from_int", integer),
+            ("law_meta.date_to_int", integer),
             ("title_text", text),
             ("body_text", text),
         ]
@@ -246,17 +261,20 @@ class QdrantVectorStore:
                 )
             )
         if as_of_start or as_of_date:
-            range_kwargs: Dict[str, str] = {}
-            if as_of_start:
-                range_kwargs["gte"] = as_of_start
-            if as_of_date:
-                range_kwargs["lte"] = as_of_date
-            conditions.append(
-                rest.FieldCondition(
-                    key="law_meta.last_amend_date",
-                    range=rest.Range(**range_kwargs),
+            range_kwargs: Dict[str, int] = {}
+            start_int = _date_string_to_int(as_of_start)
+            end_int = _date_string_to_int(as_of_date)
+            if start_int is not None:
+                range_kwargs["gte"] = start_int
+            if end_int is not None:
+                range_kwargs["lte"] = end_int
+            if range_kwargs:
+                conditions.append(
+                    rest.FieldCondition(
+                        key="law_meta.last_amend_date_int",
+                        range=rest.Range(**range_kwargs),
+                    )
                 )
-            )
         if not conditions:
             return None
         return rest.Filter(must=conditions)
@@ -405,14 +423,22 @@ class QdrantVectorStore:
             vector_dim,
         )
         try:
-            self._client.upsert(
-                collection_name=self.collection_name,
-                points=points,
-                wait=True,
-            )
+            self._commit_upsert(points)
         except Exception:
             logger.exception("Failed to upsert batch with %d points", len(points))
             raise
+
+    @retry(
+        wait=wait_exponential_jitter(initial=1, max=5),
+        stop=stop_after_attempt(5),
+        reraise=True,
+    )
+    def _commit_upsert(self, points: List[rest.PointStruct]) -> None:
+        self._client.upsert(
+            collection_name=self.collection_name,
+            points=points,
+            wait=True,
+        )
 
     def _current_collection_info(self, alias: str) -> Tuple[Optional[str], Optional[object], bool]:
         target = self._resolve_alias(alias)
@@ -451,47 +477,52 @@ class QdrantVectorStore:
             return candidate
 
     def _resolve_alias(self, alias: str) -> Optional[str]:
-        base_url = _normalise_base_url(self._endpoint_url)
-        url = f"{base_url}/aliases/{alias}"
-        headers = _build_headers(self._api_key)
         try:
-            response = httpx.get(url, headers=headers, timeout=self._timeout)
+            response = self._client.get_aliases()
         except Exception as exc:
             logger.debug("Failed to resolve alias %s: %s", alias, exc)
             return None
-        if response.status_code != 200:
-            return None
-        try:
-            payload = response.json()
-        except ValueError:
-            return None
-        if isinstance(payload, dict):
-            result = payload.get("result")
-            if isinstance(result, dict):
-                collection = result.get("collection_name") or result.get("collection")
+        aliases = getattr(response, "aliases", None) or []
+        for description in aliases:
+            name = getattr(description, "alias_name", None)
+            if name == alias:
+                collection = getattr(description, "collection_name", None)
                 if isinstance(collection, str):
                     return collection
         return None
 
-    def _swap_alias(self, alias: str, new_collection: str, previous: Optional[str]) -> None:
-        base_url = _normalise_base_url(self._endpoint_url)
-        url = f"{base_url}/aliases"
-        headers = _build_headers(self._api_key)
-        actions = [
-            {"create_alias": {"alias_name": alias, "collection_name": new_collection}}
+    def _swap_alias(
+        self, alias: str, new_collection: str, previous: Optional[str]
+    ) -> bool:
+        operations = [
+            rest.ChangeAliasesOperation(
+                create_alias=rest.CreateAlias(
+                    alias_name=alias, collection_name=new_collection
+                )
+            )
         ]
         if previous and previous != new_collection:
-            actions.append({"delete_alias": {"alias_name": alias}})
-        payload = {"actions": actions}
-        try:
-            response = httpx.post(url, headers=headers, json=payload, timeout=self._timeout)
-            response.raise_for_status()
-        except Exception:
-            logger.exception(
-                "Failed to update alias %s to point at %s", alias, new_collection
+            operations.append(
+                rest.ChangeAliasesOperation(
+                    delete_alias=rest.DeleteAlias(alias_name=alias)
+                )
             )
-            raise
+        try:
+            self._client.update_collection_aliases(
+                change_aliases_operations=operations
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to update alias %s -> %s: %s. Using direct collection writes.",
+                alias,
+                new_collection,
+                exc,
+            )
+            self._write_collection_name = new_collection
+            return False
         logger.info("Alias %s now points to collection %s", alias, new_collection)
+        self._write_collection_name = self._alias_name
+        return True
 
     def _delete_collection(self, collection: str) -> None:
         try:
@@ -809,6 +840,25 @@ def _make_hnsw_config() -> rest.HnswConfigDiff:
 
 def _make_optimizer_config() -> rest.OptimizersConfigDiff:
     return rest.OptimizersConfigDiff(memmap_threshold=20000)
+
+
+def _date_string_to_int(value: Optional[str]) -> Optional[int]:
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.strptime(text[:10], "%Y-%m-%d")
+    except ValueError:
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) >= 8:
+            try:
+                return int(digits[:8])
+            except ValueError:
+                return None
+        return None
+    return int(dt.strftime("%Y%m%d"))
 
 
 def _collection_matches(info: object, expected_size: int) -> bool:

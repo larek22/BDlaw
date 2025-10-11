@@ -35,12 +35,28 @@ class DummyEmbeddingResult:
 class DummyEmbeddingClient:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
+        self.reset_usage()
 
     def embed_texts(self, texts: Iterable[str], shas: Iterable[str], batch_size: int = 64, max_retries: int = 5) -> List[DummyEmbeddingResult]:
         vectors: List[DummyEmbeddingResult] = []
         for idx, sha in enumerate(shas):
             vectors.append(DummyEmbeddingResult(sha=sha, vector=[float(idx + 1)] * 3))
+        self._requests += 1
+        self._tokens += sum(len(text) for text in texts)
         return vectors
+
+    def reset_usage(self) -> None:
+        self._requests = 0
+        self._cached = 0
+        self._tokens = 0
+
+    def usage_summary(self) -> dict[str, float]:
+        return {
+            "requests": float(self._requests),
+            "cache_hits": float(self._cached),
+            "tokens": float(self._tokens),
+            "cost": 0.0,
+        }
 
 
 class DummyVectorStore:
