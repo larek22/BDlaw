@@ -6,6 +6,7 @@ import random
 import sys
 from datetime import datetime
 from pathlib import Path
+from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
 import logging
@@ -27,6 +28,25 @@ _REFERENCE_QUERIES = {
 }
 
 _SAMPLE_LIMIT = 5
+
+
+@dataclass
+class VerificationResult:
+    """Structured verification output with severity aware messaging."""
+
+    success: bool
+    failures: List[str]
+    warnings: List[str]
+    info: List[str]
+
+    def all_messages(self) -> List[str]:
+        """Return ordered messages for human readable logs."""
+
+        messages: List[str] = []
+        messages.extend(self.info)
+        messages.extend(f"WARNING: {warning}" for warning in self.warnings)
+        messages.extend(self.failures)
+        return messages
 
 
 def _record_total_count(total_points: int, expected_points: int) -> tuple[bool, str]:
@@ -179,7 +199,7 @@ def run_verification(
     settings: AppSettings | None = None,
     *,
     log_path: Path | None = None,
-) -> tuple[bool, List[str]]:
+) -> VerificationResult:
     settings = settings or AppSettings.load()
     repository = DataRepository()
     log_destination = log_path or repository.verification_log_path()
@@ -191,10 +211,11 @@ def run_verification(
     except Exception as exc:
         lines = [f"Verification initialisation failed: {exc}"]
         _write_log(log_destination, lines)
-        return False, lines
+        return VerificationResult(success=False, failures=lines, warnings=[], info=[])
 
     failures: List[str] = []
     info_messages: List[str] = []
+    warnings: List[str] = []
     try:
         total_points = vector_store.count_points()
     except Exception as exc:
@@ -211,8 +232,7 @@ def run_verification(
         if match:
             info_messages.append(message)
         else:
-            warning_message = f"WARNING: {message}"
-            info_messages.append(warning_message)
+            warnings.append(message)
             logger.warning(message)
         for prefix in sorted(expected_counts):
             expected = expected_counts[prefix]
@@ -248,30 +268,48 @@ def run_verification(
     else:
         failures.extend(_check_self_hits(vector_store, embedding_client, samples))
 
-    if failures:
-        lines = ["Verification failed:"]
-        if info_messages:
-            lines.extend(info_messages)
-        lines.extend(failures)
-        _write_log(log_destination, lines)
-        return False, failures
-
     summary = (
         f"Verification succeeded: {total_points} vectors available, "
         f"{len(_REFERENCE_QUERIES)} reference queries and {len(samples)} self-hits passed."
     )
+
+    if failures:
+        log_lines = ["Verification failed:"]
+        log_lines.extend(info_messages)
+        log_lines.extend(f"WARNING: {warning}" for warning in warnings)
+        log_lines.extend(failures)
+        _write_log(log_destination, log_lines)
+        return VerificationResult(
+            success=False,
+            failures=failures,
+            warnings=warnings,
+            info=info_messages,
+        )
+
     log_lines = info_messages + [summary]
+    if warnings:
+        log_lines.extend(f"WARNING: {warning}" for warning in warnings)
     _write_log(log_destination, log_lines)
-    return True, log_lines
+    return VerificationResult(
+        success=True,
+        failures=[],
+        warnings=warnings,
+        info=info_messages + [summary],
+    )
 
 
 def main() -> None:
     configure_logging()
-    success, failures = run_verification()
-    if not success:
-        for failure in failures:
+    result = run_verification()
+    if not result.success:
+        for failure in result.failures:
             print(f"FAIL: {failure}", file=sys.stderr)
+        if result.warnings:
+            for warning in result.warnings:
+                print(f"WARNING: {warning}")
         sys.exit(1)
+    for warning in result.warnings:
+        print(f"WARNING: {warning}")
     print("Verification succeeded.")
 
 

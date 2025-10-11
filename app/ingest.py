@@ -407,7 +407,7 @@ class IngestService:
                 from verify import run_verification  # local import to avoid cycles during packaging
 
                 verification_log = self.repository.verification_log_path()
-                success, notes = run_verification(
+                result = run_verification(
                     self.settings,
                     log_path=verification_log,
                 )
@@ -418,24 +418,31 @@ class IngestService:
                     progress_cb(message)
                 raise
             else:
-                log_messages = (
-                    notes
-                    if notes
-                    else ["Post-ingestion verification completed successfully."]
-                )
                 prefix = (
                     "Post-ingestion verification detected issues:"
-                    if not success
+                    if (result.failures or result.warnings)
                     else "Post-ingestion verification completed successfully."
                 )
                 logger.info(prefix)
                 if progress_cb:
                     progress_cb(prefix)
-                for msg in log_messages:
-                    logger.info(msg)
+
+                for message in result.info:
+                    logger.info(message)
                     if progress_cb:
-                        progress_cb(msg)
-                if not success:
+                        progress_cb(message)
+
+                for warning in result.warnings:
+                    warning_msg = f"WARNING: {warning}"
+                    logger.warning(warning_msg)
+                    if progress_cb:
+                        progress_cb(warning_msg)
+
+                if result.failures:
+                    for failure in result.failures:
+                        logger.error(failure)
+                        if progress_cb:
+                            progress_cb(failure)
                     message = (
                         "Verification checks failed after ingestion. See verification log for details."
                     )

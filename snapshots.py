@@ -49,11 +49,15 @@ def _restore_snapshot(vector_store: QdrantVectorStore, snapshot_path: Path) -> N
         snapshot_path=str(snapshot_path),
         wait=True,
     )
-    success, failures = run_verification(vector_store.settings)
-    if not success:
+    result = run_verification(vector_store.settings)
+    if not result.success:
         raise RuntimeError(
-            "Snapshot restore completed but verification failed: " + "; ".join(failures)
+            "Snapshot restore completed but verification failed: "
+            + "; ".join(result.failures)
         )
+    if result.warnings:
+        for warning in result.warnings:
+            print(f"WARNING: {warning}")
 
 
 def main() -> None:
