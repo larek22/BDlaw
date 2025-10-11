@@ -173,21 +173,32 @@ class QueryPipeline:
         sources: List[SourceChunk] = []
         for result in results:
             payload = result.payload or {}
+
+            raw_title = payload.get("title_text")
+            title_text = raw_title if isinstance(raw_title, str) else ""
+            raw_body = payload.get("body_text")
+            body_text = raw_body if isinstance(raw_body, str) else ""
+
+            if not title_text and body_text:
+                title_text = body_text[:120].strip()
+            if not body_text and title_text:
+                body_text = title_text
+
             chunk = ChunkRecord(
-                doc_id=str(payload.get("doc_id", "") or ""),
-                chunk_index=int(payload.get("chunk_index", 0) or 0),
-                chunk_id=str(payload.get("chunk_id", "") or ""),
-                title_text=str(payload.get("title_text", "") or ""),
-                body_text=str(payload.get("body_text", "") or ""),
+                doc_id=str(payload.get("doc_id") or ""),
+                chunk_index=int(payload.get("chunk_index") or 0),
+                chunk_id=str(payload.get("chunk_id") or ""),
+                title_text=title_text,
+                body_text=body_text,
                 hierarchy=payload.get("hierarchy") or {},
                 law_meta=payload.get("law_meta") or {},
                 source=payload.get("source") or {},
-                chunk_key=str(payload.get("chunk_key", "") or ""),
-                plan_version=str(payload.get("plan_version", "unknown") or "unknown"),
-                parser_version=str(payload.get("parser_version", "unknown") or "unknown"),
-                chunk_sha256=str(payload.get("chunk_sha256", "") or ""),
-                title_sha256=str(payload.get("title_sha256", "") or ""),
-                body_sha256=str(payload.get("body_sha256", "") or ""),
+                chunk_key=payload.get("chunk_key"),
+                plan_version=payload.get("plan_version"),
+                parser_version=payload.get("parser_version"),
+                chunk_sha256=str(payload.get("chunk_sha256") or ""),
+                title_sha256=str(payload.get("title_sha256") or ""),
+                body_sha256=str(payload.get("body_sha256") or ""),
             )
             sources.append(SourceChunk(chunk=chunk, score=float(getattr(result, "score", 0.0) or 0.0)))
         return sources

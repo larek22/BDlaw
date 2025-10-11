@@ -10,7 +10,13 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 from .data_repository import DataRepository
 from .id_utils import make_point_id
-from .legal_types import ArticleRecord, ChunkRecord, HierarchyMetadata, LawMetadata
+from .legal_types import (
+    ArticleRecord,
+    ChunkRecord,
+    DEFAULT_PARSER_VERSION,
+    HierarchyMetadata,
+    LawMetadata,
+)
 from .readers.base import DocumentText
 from .settings import AppSettings
 from .structure_planner import StructurePlan, StructurePlanner
@@ -57,7 +63,7 @@ def doc_prefix(doc_id: str) -> str:
     return f"{head}:"
 
 
-PARSER_VERSION = "1.1.0"
+PARSER_VERSION = DEFAULT_PARSER_VERSION
 
 
 def make_chunk_id(doc_id: str, chunk_index: int) -> str:
@@ -582,7 +588,7 @@ class LegalCorpusBuilder:
         body_sha = _hash_text(body)
         title_sha = _hash_text(article.title_text)
         chunk_id = make_chunk_id(article.doc_id, chunk_index)
-        chunk_key = f"{article.doc_id}::{chunk_index}::{article.source_sha256[:8]}"
+        chunk_key = f"{article.doc_id}#c{chunk_index:04d}"
         source_path = article.source_relative_path or article.source_file_name
         return ChunkRecord(
             doc_id=article.doc_id,

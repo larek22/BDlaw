@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from typing import Any, Dict, Tuple
 
@@ -39,15 +38,11 @@ def _safe_text(value: Any, default: str = "") -> str:
 
 
 def _compute_chunk_key(payload: Dict[str, Any]) -> str | None:
-    doc_id = _safe_text(payload.get("doc_id"))
+    doc_id = _safe_text(payload.get("doc_id")).strip()
     _, chunk_index = _coerce_int(payload.get("chunk_index"))
-    body_text = _safe_text(payload.get("body_text"))
     if not doc_id or chunk_index is None:
         return None
-    if not body_text:
-        return None
-    seed = f"{doc_id}:{chunk_index}:{body_text[:64]}"
-    return hashlib.sha1(seed.encode("utf-8")).hexdigest()
+    return f"{doc_id}#c{chunk_index:04d}"
 
 
 def migrate() -> None:
