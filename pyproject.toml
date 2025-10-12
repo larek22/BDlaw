@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bdlaw"
+version = "0.1.0"
+dependencies = [
+    "qdrant-client>=1.14,<1.16",
+    "tenacity>=8.4,<9",
+]
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
