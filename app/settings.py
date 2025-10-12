@@ -84,6 +84,12 @@ class QuerySettings(BaseModel):
     as_of_date: str | None = Field(default_factory=lambda: _env_str("QUERY_AS_OF_DATE"))
     as_of_start_date: str | None = Field(default_factory=lambda: _env_str("QUERY_AS_OF_START"))
     status_filter: str = Field(default_factory=lambda: _env_str("QUERY_STATUS", "active") or "active")
+    reranker_mode: str = Field(default_factory=lambda: _env_str("RERANKER_MODE", "off") or "off")
+    reranker_weight: float = Field(default_factory=lambda: _env_float("RERANKER_WEIGHT", 0.7))
+    reranker_model: str = Field(default_factory=lambda: _env_str("RERANKER_MODEL", "BAAI/bge-reranker-large") or "BAAI/bge-reranker-large")
+    reranker_cache_ttl_seconds: int = Field(default_factory=lambda: _env_int("RERANKER_CACHE_TTL", 300))
+    reranker_batch_size: int = Field(default_factory=lambda: max(1, _env_int("RERANKER_BATCH_SIZE", 8)))
+    reranker_top_n: int = Field(default_factory=lambda: max(1, _env_int("RERANKER_TOP_N", 12)))
 
     model_config = {"extra": "ignore", "validate_assignment": True}
 
@@ -106,6 +112,28 @@ class ChunkingSettings(BaseModel):
     model_config = {"extra": "ignore", "validate_assignment": True}
 
 
+class OcrSettings(BaseModel):
+    enabled: bool = Field(default_factory=lambda: _env_bool("OCR_ENABLED", True))
+    min_text_chars: int = Field(default_factory=lambda: _env_int("OCR_MIN_TEXT_CHARS", 800))
+    min_average_chars_per_line: float = Field(
+        default_factory=lambda: float(_env_float("OCR_MIN_AVG_CHARS", 5.0))
+    )
+    timeout_seconds: int = Field(default_factory=lambda: _env_int("OCR_TIMEOUT_SECONDS", 180))
+    languages: str = Field(default_factory=lambda: _env_str("OCR_LANGUAGES", "rus+eng") or "rus+eng")
+    max_retries: int = Field(default_factory=lambda: max(1, _env_int("OCR_MAX_RETRIES", 2)))
+
+    model_config = {"extra": "ignore", "validate_assignment": True}
+
+
+class RouterSettings(BaseModel):
+    use_llm: bool = Field(default_factory=lambda: _env_bool("ROUTER_USE_LLM", True))
+    model: str = Field(default_factory=lambda: _env_str("ROUTER_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini")
+    sample_bytes: int = Field(default_factory=lambda: _env_int("ROUTER_SAMPLE_BYTES", 4096))
+    max_calls_per_document: int = Field(default_factory=lambda: _env_int("ROUTER_MAX_CALLS", 2))
+
+    model_config = {"extra": "ignore", "validate_assignment": True}
+
+
 class VerificationSettings(BaseModel):
     min_top1_score: float = Field(default_factory=lambda: _env_float("VERIFICATION_MIN_TOP1_SCORE", 0.25))
 
@@ -120,6 +148,8 @@ class AppSettings(BaseModel):
     query: QuerySettings = Field(default_factory=QuerySettings)
     planner: PlannerSettings = Field(default_factory=PlannerSettings)
     chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
+    ocr: OcrSettings = Field(default_factory=OcrSettings)
+    router: RouterSettings = Field(default_factory=RouterSettings)
     verification: VerificationSettings = Field(default_factory=VerificationSettings)
     allow_destructive_migrations: bool = Field(default_factory=lambda: _env_bool("ALLOW_DESTRUCTIVE", False))
 
@@ -166,6 +196,8 @@ __all__ = [
     "QuerySettings",
     "PlannerSettings",
     "ChunkingSettings",
+    "OcrSettings",
+    "RouterSettings",
     "VerificationSettings",
     "CONFIG_PATH",
 ]

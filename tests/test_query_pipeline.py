@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 from qdrant_client.http import models as rest
 
+import app.rerankers as rerankers
+from app.rerankers import BaseReranker, CachedReranker, RerankCandidate
 from app.query_pipeline import QueryPipeline
 from app.settings import AppSettings
 
@@ -190,3 +192,98 @@ def test_build_combined_filter_applies_prefilter(monkeypatch):
 
     assert vector_store.prefilter_calls
     assert combined  # prefilter + temporal filter
+
+
+def test_build_reranker_bge_mode(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class FakeCrossEncoder:
+        def __init__(self, model_name: str) -> None:
+            calls["model_name"] = model_name
+
+        def predict(self, pairs, batch_size: int = 8):  # type: ignore[override]
+            calls["pairs"] = list(pairs)
+            calls["batch_size"] = batch_size
+            return [0.1 * (idx + 1) for idx, _ in enumerate(pairs)]
+
+    monkeypatch.setattr(rerankers, "CrossEncoder", FakeCrossEncoder, raising=False)
+
+    settings = AppSettings()
+    settings.query.reranker_mode = "bge"
+    settings.query.reranker_model = "bge-test"
+    settings.query.reranker_cache_ttl_seconds = 0
+
+    reranker = rerankers.build_reranker(settings, openai_client=None)
+    candidates = [
+        RerankCandidate(candidate_id="a", title="Статья 1", body="Текст", base_score=0.2),
+        RerankCandidate(candidate_id="b", title="Статья 2", body="Другой текст", base_score=0.1),
+    ]
+
+    scores = reranker.rerank("право", candidates)
+
+    assert calls["model_name"] == "bge-test"
+    assert len(scores) == len(candidates)
+    assert calls["pairs"][0][0] == "право"
+
+
+def test_build_reranker_llm_mode(monkeypatch):
+    responses_calls: list[tuple[str, str]] = []
+
+    class FakeResponses:
+        def create(self, *, model: str, input: str):  # type: ignore[override]
+            responses_calls.append((model, input))
+            return SimpleNamespace(output=[SimpleNamespace(text="[0.9, 0.1]")])
+
+    fake_client = SimpleNamespace(responses=FakeResponses())
+
+    settings = AppSettings()
+    settings.query.reranker_mode = "llm"
+    settings.query.reranker_cache_ttl_seconds = 0
+    settings.openai_models.chat = "gpt-4o-mini"
+
+    reranker = rerankers.build_reranker(settings, fake_client)
+    candidates = [
+        RerankCandidate(candidate_id="a", title="Статья 1", body="Текст", base_score=0.3),
+        RerankCandidate(candidate_id="b", title="Статья 2", body="Другой текст", base_score=0.1),
+    ]
+
+    scores = reranker.rerank("право", candidates)
+
+    assert scores == [0.9, 0.1]
+    assert responses_calls
+
+
+def test_apply_reranker_uses_cache(monkeypatch):
+    monkeypatch.setattr("app.query_pipeline.pymorphy2", None, raising=False)
+
+    class CountingReranker(BaseReranker):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def rerank(self, query: str, candidates):  # type: ignore[override]
+            self.calls += 1
+            return [candidate.base_score for candidate in candidates]
+
+    counting = CountingReranker()
+    cached = CachedReranker(counting, ttl_seconds=60)
+
+    monkeypatch.setattr(
+        "app.query_pipeline.build_reranker",
+        lambda settings, client: cached,
+    )
+
+    class _StubCompletions:
+        def create(self, **kwargs):  # pragma: no cover - not exercised
+            return _Response("ok")
+
+    monkeypatch.setattr("app.query_pipeline.OpenAI", lambda *a, **k: _FakeOpenAI(_StubCompletions()))
+
+    settings = AppSettings()
+    pipeline = QueryPipeline(settings, DummyEmbeddingClient(), DummyVectorStore())
+
+    result = SimpleNamespace(id="1", payload={"title_text": "Т", "body_text": "Текст"}, _combined_score=1.0)
+
+    pipeline._apply_reranker("вопрос", ["вопрос"], [result])
+    pipeline._apply_reranker("вопрос", ["вопрос"], [result])
+
+    assert counting.calls == 1

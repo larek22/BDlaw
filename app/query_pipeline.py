@@ -12,6 +12,7 @@ from .embeddings import EmbeddingClient
 from .legal_types import ChunkRecord
 from .qdrant_client import QdrantVectorStore
 from .settings import AppSettings
+from .rerankers import RerankCandidate, build_reranker
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,7 @@ class QueryPipeline:
         self.vector_store = vector_store
         api_key = settings.openai_api_key or None
         self._client = OpenAI(api_key=api_key)
+        self._reranker = build_reranker(settings, self._client)
         self._chat_model: str | None = None
 
     def _format_context(self, sources: Sequence[SourceChunk]) -> str:
@@ -204,7 +206,8 @@ class QueryPipeline:
             rrf_k=max(1, self.settings.query.fusion_rrf_k),
             query_terms=query_terms,
         )
-        return self._hydrate_sources(fused_results[:top_k])
+        reranked = self._apply_reranker(question, query_terms, fused_results)
+        return self._hydrate_sources(reranked[:top_k])
 
     def _build_combined_filter(self, question: str, top_k: int) -> rest.Filter | None:
         filters: List[rest.Filter] = []
@@ -303,7 +306,7 @@ class QueryPipeline:
         title_weight: float,
         rrf_k: int,
         query_terms: Sequence[str] | None = None,
-    ) -> List:
+    ) -> List[object]:
         combined: dict[str, float] = {}
         registry: dict[str, object] = {}
         for weight, results in ((body_weight, body_results), (title_weight, title_results)):
@@ -336,9 +339,65 @@ class QueryPipeline:
                         combined[point_id] = combined.get(point_id, 0.0) + boost_weight * hits
 
         sorted_ids = sorted(combined.items(), key=lambda item: item[1], reverse=True)
-        return [registry[point_id] for point_id, _ in sorted_ids]
+        ordered_results: List[object] = []
+        for point_id, score in sorted_ids:
+            result = registry[point_id]
+            setattr(result, "_combined_score", float(score))
+            ordered_results.append(result)
+        return ordered_results
 
-    def _hydrate_sources(self, results: Iterable) -> List[SourceChunk]:
+    def _apply_reranker(
+        self,
+        question: str,
+        query_terms: Sequence[str] | None,
+        results: List[object],
+    ) -> List[object]:
+        if not results:
+            return results
+        rerank_limit = min(len(results), max(1, self.settings.query.reranker_top_n))
+        working = results[:rerank_limit]
+        base_scores = [float(getattr(result, "_combined_score", 0.0)) for result in working]
+        max_base = max(base_scores) if base_scores else 1.0
+        if max_base == 0:
+            max_base = 1.0
+        candidates: List[RerankCandidate] = []
+        for result, base in zip(working, base_scores):
+            payload = getattr(result, "payload", {}) or {}
+            title = payload.get("title_text") if isinstance(payload.get("title_text"), str) else ""
+            body = payload.get("body_text") if isinstance(payload.get("body_text"), str) else ""
+            candidate_id = str(getattr(result, "id", len(candidates)))
+            candidates.append(
+                RerankCandidate(
+                    candidate_id=candidate_id,
+                    title=title or "",
+                    body=body or "",
+                    base_score=float(base / max_base),
+                )
+            )
+
+        try:
+            scores = self._reranker.rerank(question, candidates)
+        except Exception as exc:  # pragma: no cover - reranker failures
+            logger.warning("Reranker failed; using baseline order: %s", exc)
+            return results
+        if len(scores) != len(working):
+            logger.debug(
+                "Reranker returned mismatched score count (%s vs %s); using baseline order",
+                len(scores),
+                len(working),
+            )
+            return results
+
+        scored = []
+        for result, score in zip(working, scores):
+            setattr(result, "_reranked_score", float(score))
+            scored.append((result, float(score)))
+        scored.sort(key=lambda item: item[1], reverse=True)
+        reordered = [item[0] for item in scored]
+        remainder = results[rerank_limit:]
+        return reordered + list(remainder)
+
+    def _hydrate_sources(self, results: Iterable[object]) -> List[SourceChunk]:
         sources: List[SourceChunk] = []
         for result in results:
             payload = result.payload or {}
@@ -377,7 +436,12 @@ class QueryPipeline:
                 content_sha256=str(payload.get("content_sha256") or ""),
                 source_file=str(payload.get("source_file") or ""),
             )
-            sources.append(SourceChunk(chunk=chunk, score=float(getattr(result, "score", 0.0) or 0.0)))
+            fused_score = getattr(result, "_reranked_score", None)
+            if fused_score is None:
+                fused_score = getattr(result, "_combined_score", None)
+            if fused_score is None:
+                fused_score = getattr(result, "score", 0.0)
+            sources.append(SourceChunk(chunk=chunk, score=float(fused_score or 0.0)))
         return sources
 
     def _get_chat_model(self) -> str:

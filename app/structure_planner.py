@@ -20,6 +20,11 @@ from .data_repository import DataRepository
 logger = logging.getLogger(__name__)
 
 
+class MetadataExtractor(BaseModel):
+    source: str
+    pattern: str | None = None
+
+
 class PlanLevel(BaseModel):
     name: str
     regex: str
@@ -39,6 +44,7 @@ class StructurePlan(BaseModel):
     doc_type: str = "russian_law"
     levels: list[PlanLevel]
     split: SplitConfig
+    metadata_fields: Dict[str, MetadataExtractor] = Field(default_factory=dict)
 
 
 _DEFAULT_PLAN = StructurePlan(
@@ -73,6 +79,7 @@ _DEFAULT_PLAN = StructurePlan(
         max_tokens=900,
         overlap_tokens=120,
     ),
+    metadata_fields={},
 )
 
 

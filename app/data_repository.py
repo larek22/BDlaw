@@ -18,6 +18,7 @@ class RepositoryPaths:
     chunks: Path
     snapshots: Path
     logs: Path
+    ocr_cache: Path
 
 
 class DataRepository:
@@ -32,9 +33,18 @@ class DataRepository:
         chunks = root / "chunks"
         snapshots = root / "snapshots"
         logs = root / "logs"
-        for directory in (raw, staging, chunks, snapshots, logs):
+        ocr_cache = staging / "ocr_cache"
+        for directory in (raw, staging, chunks, snapshots, logs, ocr_cache):
             directory.mkdir(parents=True, exist_ok=True)
-        return RepositoryPaths(root=root, raw=raw, staging=staging, chunks=chunks, snapshots=snapshots, logs=logs)
+        return RepositoryPaths(
+            root=root,
+            raw=raw,
+            staging=staging,
+            chunks=chunks,
+            snapshots=snapshots,
+            logs=logs,
+            ocr_cache=ocr_cache,
+        )
 
     def derive_slugs(self, source_path: Path) -> tuple[str, str]:
         try:
@@ -67,6 +77,17 @@ class DataRepository:
         """Return the path used to cache structure plans."""
 
         return self.paths.staging / "plan_cache.json"
+
+    def router_cache_path(self) -> Path:
+        """Return the on-disk cache location for ingestion router plans."""
+
+        return self.paths.staging / "router_cache.sqlite"
+
+    def ocr_cache_path(self) -> Path:
+        """Directory for persisted OCR outputs keyed by file hash."""
+
+        self.paths.ocr_cache.mkdir(parents=True, exist_ok=True)
+        return self.paths.ocr_cache
 
     def manifest_path(self, corpus_slug: str, part_slug: str) -> Path:
         staging_dir, _ = self.ensure_subdirectories(corpus_slug, part_slug)

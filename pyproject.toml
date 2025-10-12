@@ -24,6 +24,7 @@ dependencies = [
     "tenacity>=8.4,<9",
     "tqdm>=4.66,<5",
     "orjson>=3.10,<4",
+    "sentence-transformers>=2.6,<3",
 ]
 
 [project.optional-dependencies]

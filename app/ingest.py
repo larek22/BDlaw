@@ -50,7 +50,10 @@ class IngestService:
         if reader_factory is None:
             from .readers.factory import DocumentReaderFactory  # local import to avoid optional deps at import time
 
-            reader_factory = DocumentReaderFactory()
+            reader_factory = DocumentReaderFactory(
+                settings=self.settings,
+                repository=self.repository,
+            )
         self.reader_factory = reader_factory
         self.builder = LegalCorpusBuilder(self.repository, settings)
 

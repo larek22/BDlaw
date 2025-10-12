@@ -11,6 +11,12 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 from .data_repository import DataRepository
 from .id_utils import make_point_id
+from .ingest_router import (
+    IngestionPlan,
+    IngestionRouter,
+    SegmentationConfig,
+    build_sniff_info,
+)
 from .legal_types import (
     ArticleRecord,
     ChunkRecord,
@@ -20,7 +26,13 @@ from .legal_types import (
 )
 from .readers.base import DocumentText
 from .settings import AppSettings
-from .structure_planner import StructurePlan, StructurePlanner
+from .structure_planner import (
+    MetadataExtractor,
+    PlanLevel,
+    SplitConfig,
+    StructurePlan,
+    StructurePlanner,
+)
 
 try:  # optional dependency for token-aware chunking
     import tiktoken  # type: ignore
@@ -211,6 +223,7 @@ class LegalCorpusBuilder:
         self.repository = repository
         self.settings = settings or AppSettings.load()
         self.planner = StructurePlanner(self.settings, repository)
+        self.router = IngestionRouter(self.settings, repository)
         self.max_tokens = self.settings.chunking.max_tokens
         self.overlap_tokens = self.settings.chunking.overlap_tokens
         self.tokenizer = self._load_tokenizer(self.settings.chunking.tokenizer)
@@ -240,6 +253,157 @@ class LegalCorpusBuilder:
 
             return _CharacterTokenizer()
 
+    def _structure_plan_from_router(self, router_plan: IngestionPlan) -> StructurePlan | None:
+        segmentation = router_plan.segmentation or SegmentationConfig()
+        if segmentation.strategy != "regex":
+            if router_plan.doc_type == "legal_code":
+                logger.debug(
+                    "Router returned non-regex strategy '%s' for legal code; falling back",
+                    segmentation.strategy,
+                )
+            return None
+
+        regexes = segmentation.regexes or {}
+        article_regex = regexes.get("article")
+        if not article_regex:
+            if router_plan.doc_type == "legal_code":
+                logger.debug("Router plan missing article regex; using fallback plan")
+            return None
+
+        max_tokens = max(200, min(router_plan.chunk_tokens, 2000))
+        overlap_tokens = max(0, min(router_plan.token_overlap, 400))
+
+        def _normalise(pattern: str, group_name: str) -> str:
+            candidate = pattern.strip()
+            if not candidate.startswith("(?m)"):
+                candidate = "(?m)" + candidate
+            if f"?P<{group_name}>" not in candidate:
+                candidate = re.sub(r"\((?!\?)", f"(?P<{group_name}>", candidate, count=1)
+            return candidate
+
+        levels: List[PlanLevel] = []
+        section_regex = regexes.get("section")
+        if section_regex:
+            levels.append(
+                PlanLevel(
+                    name="section_roman",
+                    regex=_normalise(section_regex, "num"),
+                    id_field="section_roman",
+                )
+            )
+        chapter_regex = regexes.get("chapter")
+        if chapter_regex:
+            levels.append(
+                PlanLevel(
+                    name="chapter_no",
+                    regex=_normalise(chapter_regex, "num"),
+                    id_field="chapter_no",
+                )
+            )
+
+        levels.append(
+            PlanLevel(
+                name="article_no",
+                regex=_normalise(article_regex, "num"),
+                id_field="article_no",
+            )
+        )
+        levels.append(
+            PlanLevel(
+                name="clause_no",
+                regex=r"(?m)^\s*(?P<num>\d+)\.\s+",
+                id_field="clause_no",
+                optional=True,
+            )
+        )
+
+        plan_version = f"router.{router_plan.doc_type}.v1"
+        metadata_fields: Dict[str, MetadataExtractor] = {}
+        for field in router_plan.metadata_schema:
+            name = field.name.strip()
+            if not name:
+                continue
+            metadata_fields[name] = MetadataExtractor(
+                source=field.source,
+                pattern=field.pattern,
+            )
+        return StructurePlan(
+            plan_version=plan_version,
+            doc_type="russian_law" if router_plan.doc_type == "legal_code" else router_plan.doc_type,
+            levels=levels,
+            split=SplitConfig(
+                primary="article_no",
+                secondary=["clause_no"],
+                max_tokens=max_tokens,
+                overlap_tokens=overlap_tokens,
+            ),
+            metadata_fields=metadata_fields,
+        )
+
+    def _apply_plan_metadata(
+        self,
+        plan: StructurePlan,
+        normalized_text: str,
+        law_meta: LawMetadata,
+    ) -> Dict[str, str]:
+        extracted: Dict[str, str] = {}
+        metadata_fields = getattr(plan, "metadata_fields", {}) or {}
+        if not metadata_fields:
+            return extracted
+
+        for name, extractor in metadata_fields.items():
+            source = (extractor.source or "").lower()
+            pattern = extractor.pattern
+            value: str | None = None
+            if source == "regex_group" and pattern:
+                candidate = pattern.strip()
+                if candidate and not candidate.startswith("(?m)"):
+                    candidate = "(?m)" + candidate
+                try:
+                    regex = re.compile(candidate)
+                except re.error:
+                    logger.debug("Invalid metadata regex for %s: %s", name, pattern)
+                    continue
+                match = regex.search(normalized_text)
+                if not match:
+                    continue
+                groupdict = match.groupdict()
+                if groupdict:
+                    for key in ("value", "val", "num", "date", "text"):
+                        candidate_value = groupdict.get(key)
+                        if candidate_value:
+                            value = candidate_value
+                            break
+                    if value is None:
+                        value = next((v for v in groupdict.values() if v), None)
+                if value is None:
+                    groups = match.groups()
+                    if groups:
+                        value = next((g for g in groups if g), None)
+            elif source == "fixed" and pattern:
+                value = pattern
+
+            if value:
+                extracted[name] = value.strip()
+
+        version_value = extracted.get("version_date")
+        if version_value:
+            iso = _iso_date(version_value)
+            if iso:
+                law_meta.last_amend_date = iso
+
+        enact_value = extracted.get("enact_date")
+        if enact_value:
+            iso = _iso_date(enact_value)
+            if iso:
+                law_meta.enact_date = iso
+
+        law_no_value = extracted.get("law_no")
+        if law_no_value:
+            law_meta.law_no = law_no_value
+
+        return extracted
+
     def process_document(
         self,
         document: DocumentText,
@@ -267,7 +431,26 @@ class LegalCorpusBuilder:
         normalized_path = self.repository.normalized_text_path(corpus_slug, part_slug)
         normalized_path.write_text(normalized_text, encoding="utf-8")
 
-        plan = self.planner.plan_for_text(normalized_text)
+        sniff_info = build_sniff_info(document.path, document.pages)
+        router_plan = self.router.route(sniff_info)
+        plan_override = self._structure_plan_from_router(router_plan)
+        if plan_override is not None:
+            plan = plan_override
+            chunk_tokens = plan.split.max_tokens
+            overlap_tokens = plan.split.overlap_tokens
+            logger.info(
+                "Router selected plan doc_type=%s chunk_tokens=%s overlap=%s",
+                router_plan.doc_type,
+                chunk_tokens,
+                overlap_tokens,
+            )
+        else:
+            plan = self.planner.plan_for_text(normalized_text)
+            chunk_tokens = plan.split.max_tokens
+            overlap_tokens = plan.split.overlap_tokens
+        extracted_metadata = self._apply_plan_metadata(plan, normalized_text, law_meta)
+        if extracted_metadata:
+            logger.debug("Applied plan metadata overrides: %s", extracted_metadata)
         articles = self._extract_articles(
             normalized_text=normalized_text,
             law_meta=law_meta,
@@ -293,8 +476,8 @@ class LegalCorpusBuilder:
                 self._chunk_article(
                     article,
                     plan_version=plan.plan_version,
-                    max_tokens=self.max_tokens,
-                    overlap_tokens=self.overlap_tokens,
+                    max_tokens=chunk_tokens or self.max_tokens,
+                    overlap_tokens=overlap_tokens or self.overlap_tokens,
                 )
             )
 
