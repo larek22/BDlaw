@@ -80,6 +80,7 @@ class QuerySettings(BaseModel):
     fusion_weight_title: float = Field(default_factory=lambda: _env_float("FUSION_WEIGHT_TITLE", 0.4))
     fusion_weight_body: float = Field(default_factory=lambda: _env_float("FUSION_WEIGHT_BODY", 0.6))
     fusion_rrf_k: int = Field(default_factory=lambda: _env_int("FUSION_RRF_K", 60))
+    keyword_boost_weight: float = Field(default_factory=lambda: _env_float("QUERY_KEYWORD_BOOST_WEIGHT", 0.0))
     as_of_date: str | None = Field(default_factory=lambda: _env_str("QUERY_AS_OF_DATE"))
     as_of_start_date: str | None = Field(default_factory=lambda: _env_str("QUERY_AS_OF_START"))
     status_filter: str = Field(default_factory=lambda: _env_str("QUERY_STATUS", "active") or "active")

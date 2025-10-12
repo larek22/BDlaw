@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Iterable, List, Sequence
 
@@ -13,6 +14,89 @@ from .qdrant_client import QdrantVectorStore
 from .settings import AppSettings
 
 logger = logging.getLogger(__name__)
+
+
+try:  # pragma: no cover - optional dependency
+    import pymorphy2  # type: ignore
+except Exception:  # pragma: no cover - env without pymorphy2
+    pymorphy2 = None  # type: ignore
+
+
+_WORD_RE = re.compile(r"[\wЁё]+", re.UNICODE)
+_STOPWORDS = {
+    "и",
+    "в",
+    "во",
+    "на",
+    "по",
+    "о",
+    "об",
+    "от",
+    "до",
+    "за",
+    "из",
+    "с",
+    "со",
+    "у",
+    "к",
+    "как",
+    "а",
+    "но",
+    "что",
+    "это",
+    "же",
+    "бы",
+    "ли",
+    "мы",
+    "вы",
+    "он",
+    "она",
+    "оно",
+    "они",
+}
+_MORPH_ANALYZER = None
+
+
+def _get_morph():
+    global _MORPH_ANALYZER
+    if pymorphy2 is None:
+        _MORPH_ANALYZER = None
+        return None
+    if _MORPH_ANALYZER is None:
+        try:
+            _MORPH_ANALYZER = pymorphy2.MorphAnalyzer()
+        except Exception:  # pragma: no cover - analyser init failures
+            _MORPH_ANALYZER = None
+    return _MORPH_ANALYZER
+
+
+def _coerce_int(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            try:
+                return int(text)
+            except ValueError:
+                return None
+    return None
+
+
+def _article_base_from_value(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        base = text.split(".", 1)[0]
+        if base.isdigit():
+            try:
+                return int(base)
+            except ValueError:
+                return None
+    return None
 
 
 @dataclass
@@ -97,6 +181,7 @@ class QueryPipeline:
         return self._retrieve_sources(question, top_k)
 
     def _retrieve_sources(self, question: str, top_k: int) -> List[SourceChunk]:
+        query_terms = self._tokenize_query(question)
         query_vector = self.embedding_client.embed_query(question)
         filter_ = self._build_combined_filter(question, top_k)
         body_results = self.vector_store.query(
@@ -117,6 +202,7 @@ class QueryPipeline:
             body_weight=self.settings.query.fusion_weight_body,
             title_weight=self.settings.query.fusion_weight_title,
             rrf_k=max(1, self.settings.query.fusion_rrf_k),
+            query_terms=query_terms,
         )
         return self._hydrate_sources(fused_results[:top_k])
 
@@ -146,6 +232,68 @@ class QueryPipeline:
 
         return self.vector_store.combine_filters(*filters)
 
+    def _tokenize_query(self, query: str) -> List[str]:
+        if not query:
+            return []
+        morph = _get_morph()
+        tokens: List[str] = []
+        for word in _WORD_RE.findall(query.lower()):
+            if not word:
+                continue
+            lemma = word
+            if morph is not None:
+                try:
+                    parsed = morph.parse(word)
+                    if parsed:
+                        lemma = parsed[0].normal_form
+                except Exception:  # pragma: no cover - morphological failures
+                    lemma = word
+            if lemma in _STOPWORDS:
+                continue
+            if lemma:
+                tokens.append(lemma)
+        return tokens
+
+    def _build_chapter_filter(self, chapter: str | None) -> rest.Filter | None:
+        if chapter is None:
+            return None
+        chapter_text = chapter.strip().lower()
+        if not chapter_text or chapter_text in {"all", "*"}:
+            return None
+        chapter_no = _coerce_int(chapter_text)
+        if chapter_no is None:
+            return None
+        return rest.Filter(
+            must=[
+                rest.FieldCondition(
+                    key="hierarchy.chapter_no",
+                    match=rest.MatchValue(value=chapter_no),
+                )
+            ]
+        )
+
+    def _build_article_range_filter(
+        self, start: str | None, end: str | None
+    ) -> rest.Filter | None:
+        if not hasattr(rest, "Range"):
+            return None
+        start_base = _article_base_from_value(start) if start else None
+        end_base = _article_base_from_value(end) if end else None
+        if start_base is None and end_base is None:
+            return None
+        range_kwargs: dict[str, int] = {}
+        if start_base is not None:
+            range_kwargs["gte"] = start_base
+        if end_base is not None:
+            range_kwargs["lte"] = end_base
+        if not range_kwargs:
+            return None
+        condition = rest.FieldCondition(
+            key="article_base",
+            range=rest.Range(**range_kwargs),
+        )
+        return rest.Filter(must=[condition])
+
     def _fuse_results(
         self,
         body_results: Sequence,
@@ -154,6 +302,7 @@ class QueryPipeline:
         body_weight: float,
         title_weight: float,
         rrf_k: int,
+        query_terms: Sequence[str] | None = None,
     ) -> List:
         combined: dict[str, float] = {}
         registry: dict[str, object] = {}
@@ -166,6 +315,26 @@ class QueryPipeline:
                     continue
                 registry[point_id] = result
                 combined[point_id] = combined.get(point_id, 0.0) + weight * (1.0 / (rrf_k + rank))
+        boost_weight = getattr(self.settings.query, "keyword_boost_weight", 0.0)
+        if query_terms and boost_weight > 0:
+            lowered_terms = [term.lower() for term in query_terms if term]
+            if lowered_terms:
+                for point_id, result in registry.items():
+                    payload = getattr(result, "payload", {}) or {}
+                    snippets: List[str] = []
+                    title = payload.get("title_text")
+                    body = payload.get("body_text")
+                    if isinstance(title, str):
+                        snippets.append(title.lower())
+                    if isinstance(body, str):
+                        snippets.append(body.lower())
+                    if not snippets:
+                        continue
+                    text_blob = " \\n".join(snippets)
+                    hits = sum(1 for term in lowered_terms if term and term in text_blob)
+                    if hits:
+                        combined[point_id] = combined.get(point_id, 0.0) + boost_weight * hits
+
         sorted_ids = sorted(combined.items(), key=lambda item: item[1], reverse=True)
         return [registry[point_id] for point_id, _ in sorted_ids]
 
@@ -199,6 +368,14 @@ class QueryPipeline:
                 chunk_sha256=str(payload.get("chunk_sha256") or ""),
                 title_sha256=str(payload.get("title_sha256") or ""),
                 body_sha256=str(payload.get("body_sha256") or ""),
+                law=str(payload.get("law") or ""),
+                part=_coerce_int(payload.get("part")),
+                article_str=str(payload.get("article_str") or ""),
+                article_base=_coerce_int(payload.get("article_base")),
+                article_suffix=_coerce_int(payload.get("article_suffix")),
+                version_date=str(payload.get("version_date") or ""),
+                content_sha256=str(payload.get("content_sha256") or ""),
+                source_file=str(payload.get("source_file") or ""),
             )
             sources.append(SourceChunk(chunk=chunk, score=float(getattr(result, "score", 0.0) or 0.0)))
         return sources
