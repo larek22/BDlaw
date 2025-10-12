@@ -3,6 +3,10 @@ import pytest
 openai = pytest.importorskip("openai")
 from openai import PermissionDeniedError  # type: ignore  # noqa: E402
 
+from types import SimpleNamespace
+
+from qdrant_client.http import models as rest
+
 from app.query_pipeline import QueryPipeline
 from app.settings import AppSettings
 
@@ -16,6 +20,7 @@ class DummyVectorStore:
     def __init__(self) -> None:
         self.query_calls: list[tuple[str, int]] = []
         self.prefilter_calls: list[tuple[str, int]] = []
+        self.keyword_prefilter_results: list[str] = []
 
     def query(self, *, vector_name: str, query_vector: list[float], limit: int, filters=None):
         self.query_calls.append((vector_name, limit))
@@ -23,7 +28,7 @@ class DummyVectorStore:
 
     def keyword_prefilter(self, query: str, limit: int) -> list[str]:
         self.prefilter_calls.append((query, limit))
-        return []
+        return list(self.keyword_prefilter_results)
 
     def build_doc_id_filter(self, doc_ids):  # pragma: no cover - not used in assertions
         return doc_ids
@@ -116,3 +121,72 @@ def test_query_pipeline_permission_error_both_fail(monkeypatch):
         pipeline.answer("What is the answer?")
 
     assert "No accessible OpenAI chat model" in str(exc.value)
+
+
+def test_tokenize_query_filters_stopwords_and_handles_empty(monkeypatch):
+    monkeypatch.setattr("app.query_pipeline.pymorphy2", None, raising=False)
+    settings = AppSettings()
+    pipeline = QueryPipeline(settings, DummyEmbeddingClient(), DummyVectorStore())
+
+    assert pipeline._tokenize_query("") == []
+    tokens = pipeline._tokenize_query("И Исключительное право")
+    assert tokens == ["исключительное", "право"]
+
+
+def test_build_chapter_filter_and_article_range_filters(monkeypatch):
+    monkeypatch.setattr("app.query_pipeline.pymorphy2", None, raising=False)
+    settings = AppSettings()
+    pipeline = QueryPipeline(settings, DummyEmbeddingClient(), DummyVectorStore())
+
+    assert pipeline._build_chapter_filter("all") is None
+    chapter_filter = pipeline._build_chapter_filter("73")
+    assert isinstance(chapter_filter, rest.Filter)
+    assert chapter_filter.must[0].match.value == 73
+
+    if not hasattr(rest, "Range"):
+        pytest.skip("rest.Range not available in current qdrant-client build")
+
+    article_filter = pipeline._build_article_range_filter("1446.1", "1450")
+    assert isinstance(article_filter, rest.Filter)
+    condition = article_filter.must[0]
+    assert condition.range.gte == 1446
+    assert condition.range.lte == 1450
+
+    assert pipeline._build_article_range_filter(None, None) is None
+
+
+def test_keyword_boost_changes_ranking(monkeypatch):
+    monkeypatch.setattr("app.query_pipeline.pymorphy2", None, raising=False)
+    settings = AppSettings()
+    settings.query.keyword_boost_weight = 0.5
+    pipeline = QueryPipeline(settings, DummyEmbeddingClient(), DummyVectorStore())
+
+    good_payload = {"title_text": "Исключительное право", "body_text": ""}
+    neutral_payload = {"title_text": "Другое", "body_text": ""}
+    boosted = SimpleNamespace(id="1", payload=good_payload, score=0.1)
+    neutral = SimpleNamespace(id="2", payload=neutral_payload, score=0.1)
+
+    query_terms = pipeline._tokenize_query("исключительное право")
+    fused = pipeline._fuse_results(
+        body_results=[neutral, boosted],
+        title_results=[],
+        body_weight=1.0,
+        title_weight=0.0,
+        rrf_k=60,
+        query_terms=query_terms,
+    )
+
+    assert fused[0].payload == good_payload
+
+
+def test_build_combined_filter_applies_prefilter(monkeypatch):
+    monkeypatch.setattr("app.query_pipeline.pymorphy2", None, raising=False)
+    settings = AppSettings()
+    vector_store = DummyVectorStore()
+    vector_store.keyword_prefilter_results = ["doc-1"]
+    pipeline = QueryPipeline(settings, DummyEmbeddingClient(), vector_store)
+
+    combined = pipeline._build_combined_filter("query", top_k=5)
+
+    assert vector_store.prefilter_calls
+    assert combined  # prefilter + temporal filter

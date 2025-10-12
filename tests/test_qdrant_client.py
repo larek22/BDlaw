@@ -4,7 +4,10 @@ import pytest
 
 pytest.importorskip("qdrant_client")
 
+from types import SimpleNamespace
+
 from app.qdrant_client import (
+    QdrantVectorStore,
     _collection_matches,
     _mask_api_key,
     _payload_schema,
@@ -72,3 +75,80 @@ def test_collection_matches_rejects_wrong_names():
     vectors = {"default": _DummyVector(3072)}
     info = _DummyInfo(vectors)
     assert not _collection_matches(info, 3072)
+
+
+def _make_store(client):
+    store = object.__new__(QdrantVectorStore)
+    store._client = client
+    store._alias_name = "kb_docs_v1"
+    store._write_collection_name = "kb_docs_v1"
+    return store
+
+
+def test_payload_to_chunk_coerces_strings():
+    store = _make_store(SimpleNamespace())
+    payload = {
+        "doc_id": 123,
+        "chunk_index": "5",
+        "chunk_id": 456,
+        "title_text": None,
+        "body_text": "Текст",
+        "hierarchy": {"chapter_no": 7},
+        "law_meta": None,
+        "source": None,
+    }
+
+    chunk = store.payload_to_chunk(payload)
+
+    assert chunk.doc_id == "123"
+    assert chunk.chunk_index == 5
+    assert chunk.title_text.startswith("Текст")
+    assert chunk.hierarchy["chapter_no"] == 7
+
+
+def test_list_chapters_collects_unique_values():
+    batches = [
+        (
+            [
+                SimpleNamespace(payload={"hierarchy": {"chapter_no": 1}}),
+                SimpleNamespace(payload={"hierarchy": {"chapter_no": 2}}),
+            ],
+            None,
+        )
+    ]
+
+    class DummyClient:
+        def scroll(self, **kwargs):
+            return batches.pop(0) if batches else ([], None)
+
+    store = _make_store(DummyClient())
+
+    assert store.list_chapters() == [1, 2]
+
+
+def test_fetch_article_chunks_sorts_by_chunk_index():
+    payloads = [
+        {"doc_id": "doc", "chunk_index": 4, "title_text": "", "body_text": "b"},
+        {"doc_id": "doc", "chunk_index": 1, "title_text": "", "body_text": "a"},
+    ]
+    batches = [
+        ([SimpleNamespace(payload=payload) for payload in payloads], None)
+    ]
+
+    class DummyClient:
+        def scroll(self, **kwargs):
+            return batches.pop(0) if batches else ([], None)
+
+    store = _make_store(DummyClient())
+    store.build_doc_id_filter = lambda doc_ids: {"doc_ids": doc_ids}
+
+    records = store.fetch_article_chunks("doc")
+
+    assert [record.chunk_index for record in records] == [1, 4]
+
+
+def test_active_collection_target_uses_alias_resolution():
+    store = _make_store(SimpleNamespace())
+    store._resolve_alias = lambda alias: "physical"  # type: ignore[attr-defined]
+
+    assert store.active_collection_target() == "physical"

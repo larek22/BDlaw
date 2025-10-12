@@ -13,6 +13,7 @@ Vector KB Assistant is a desktop application built with PySide6 that lets you in
 - Parse Russian legal documents into Part/Chapter/Article structures with law-aware metadata and deterministic document versions.
 - Emit dual named vectors (`title_vec`, `body_vec`) for hybrid retrieval, maintain payload indexes for law-specific filters, and
   persist chunk provenance including parser/plan versions and auditing keys.
+- Combine the named-vector searches with reciprocal-rank fusion, optional Russian keyword boosts, and interactive chapter/article filters for precise legal lookups.
 - Ask natural-language questions with answers grounded in retrieved chunks.
 - View citations and highlighted source snippets for transparency.
 - Responsive PySide6 GUI with background threads for long-running tasks.
@@ -36,6 +37,7 @@ The project pins all runtime dependencies to reproducible versions. The most cri
 | `httpx` | 0.27.0 |
 | `openai` | 1.30.1 |
 | `pydantic` | 2.8.2 |
+| `pymorphy2` *(optional, keyword boost lemmatisation)* | 0.9.1 |
 
 At runtime the app logs the detected Qdrant server version, the `qdrant-client` version above, and the active embedding model so the environment is always auditable.
 
@@ -70,7 +72,7 @@ The first launch creates a configuration directory at `~/.vector_kb` containing 
    * Each article version receives a document id such as `gkrf:part3:art1110:v2024-08-08`; re-ingesting unchanged versions is idempotent, while changed versions are deleted and re-upserted by doc id.
    * After every batch upsert the log shows the updated Qdrant point count, the delta versus the previous run, and a verification search so you can confirm vectors are persisted.
    * Use **Reset DB** for a one-click drop-and-recreate of the collection before a clean rebuild. The app confirms the action, recreates the named-vector schema, and logs the reset so you start from a known-good baseline.
-3. After ingestion, go to the **Ask** tab, enter a question, and click **Search & Answer**. Answers include citations, and sources display highlighted query terms.
+3. After ingestion, go to the **Ask** tab, enter a question, and click **Search & Answer**. Answers include citations, and sources display highlighted query terms. Use the chapter dropdown or article range inputs to constrain retrieval when you already know the relevant portion of the code. Each search hit exposes a **Show full article** button that stitches all of the article's chunks together for quick review.
 
 ## Configuration
 
@@ -130,6 +132,7 @@ The application creates (or recreates) the collection with two named vectors per
 ```
 
 Payload indexes are installed for `doc_id`, the legal hierarchy fields, law status and amendment date, and for full-text search over `title_text` and `body_text`. Hybrid retrieval first applies a keyword filter, runs vector search on both named vectors, and fuses the results using reciprocal-rank fusion with configurable weights. Temporal filters derived from `QUERY_STATUS`, `QUERY_AS_OF_START`, and `QUERY_AS_OF_DATE` ensure answers respect “as-of” queries.
+When the optional `pymorphy2` dependency is present you can enable `KEYWORD_BOOST_WEIGHT` to lemmatise Russian search terms and reward chunks that contain the same lemmas. If the library is absent the boost gracefully falls back to lower-cased token comparisons.
 
 ## Exporting the vector database
 
@@ -163,12 +166,15 @@ Application logs are written to `~/.vector_kb/app.log` and streamed into the GUI
 
 ## Verification & diagnostics helpers
 
-Two helper scripts are provided in the project root:
+The repository ships a suite of scripts to automate ingestion validation and maintenance:
 
 - `python debug_qdrant.py` prints the configured collections and the current point count for `kb_docs_v1`. It honours the values saved in the app settings and optional `QDRANT_URL`, `QDRANT_API_KEY`, and `QDRANT_COLLECTION` environment overrides.
 - `python e2e_embed_upsert_test.py` recreates a scratch collection named `<collection>_debug`, uploads a single freshly generated embedding, verifies the count reaches 1, and performs a retrieval sanity check (limit 3). This is an easy way to confirm your OpenAI credentials, embedding dimension, and Qdrant endpoint all work together outside the GUI.
 - `python search_api.py "your question" --pretty` runs the hybrid retrieval pipeline (keyword prefilter + dual named vectors) and prints the top-ranked chunks without invoking the chat model.
 - `python verify.py` executes the end-to-end smoke checks described in the playbook: reference legal queries, self-hit tests for random articles, and empty-collection detection. The command exits with a non-zero status if any check fails.
+- `python tools/backfill_chapters.py --normalized-path data/users.normalized.txt` derives chapter metadata from the normalised corpus and patches any stored points missing `hierarchy.chapter_no` without downtime. Run this once after upgrading from older releases that lacked case-insensitive chapter parsing.
+- `python tools/verify_post_ingest.py` performs a lightweight structural audit (count checks, missing chapter detection, optional smoke chapter queries) and is suitable for CI pipelines. Configure `EXPECTED_POINTS` or `SMOKE_CHAPTER` via environment variables when required.
+- `python tools/dump_stats.py` prints total point counts and per-chapter breakdowns to help during manual QA sessions.
 
 All scripts log the endpoint in use so you can confirm that Cloud URLs are respected and that the pinned dependency versions are active.
 

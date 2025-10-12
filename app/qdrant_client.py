@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
-from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 import httpx
 import importlib.metadata
@@ -13,7 +13,20 @@ try:  # pragma: no cover - optional import varies by qdrant-client version
     from qdrant_client.http.exceptions import ResponseHandlingException as _ResponseHandlingException
 except Exception:  # pragma: no cover - older clients
     _ResponseHandlingException = ()
-from tenacity import retry, stop_after_attempt, wait_exponential_jitter
+try:  # pragma: no cover - dependency supplied via requirements
+    from tenacity import retry, stop_after_attempt, wait_exponential_jitter
+except Exception:  # pragma: no cover - fallback when dependency missing in test envs
+    def retry(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
+
+    def stop_after_attempt(*args, **kwargs):  # type: ignore
+        return None
+
+    def wait_exponential_jitter(*args, **kwargs):  # type: ignore
+        return None
 
 from .id_utils import make_point_id
 from .legal_types import ChunkRecord
@@ -227,6 +240,101 @@ class QdrantVectorStore:
             if not offset:
                 break
         return doc_ids
+
+    def payload_to_chunk(self, payload: Mapping[str, object]) -> ChunkRecord:
+        raw_title = payload.get("title_text")
+        title_text = raw_title if isinstance(raw_title, str) else ""
+        raw_body = payload.get("body_text")
+        body_text = raw_body if isinstance(raw_body, str) else ""
+
+        if not title_text and body_text:
+            title_text = body_text[:120].strip()
+        if not body_text and title_text:
+            body_text = title_text
+
+        hierarchy = dict(payload.get("hierarchy") or {})
+        law_meta = dict(payload.get("law_meta") or {})
+        source = dict(payload.get("source") or {})
+
+        return ChunkRecord(
+            doc_id=str(payload.get("doc_id") or ""),
+            chunk_index=int(payload.get("chunk_index") or 0),
+            chunk_id=str(payload.get("chunk_id") or ""),
+            title_text=title_text,
+            body_text=body_text,
+            hierarchy=hierarchy,
+            law_meta=law_meta,
+            source=source,
+            chunk_key=payload.get("chunk_key"),
+            plan_version=payload.get("plan_version"),
+            parser_version=payload.get("parser_version"),
+            chunk_sha256=str(payload.get("chunk_sha256") or ""),
+            title_sha256=str(payload.get("title_sha256") or ""),
+            body_sha256=str(payload.get("body_sha256") or ""),
+        )
+
+    def list_chapters(self) -> List[int]:
+        seen: Set[int] = set()
+        offset = None
+        while True:
+            try:
+                points, offset = self._client.scroll(
+                    collection_name=self.collection_name,
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                )
+            except Exception:
+                logger.exception("Failed to enumerate chapters from %s", self.collection_name)
+                break
+            if not points:
+                break
+            for point in points:
+                payload = getattr(point, "payload", {}) or {}
+                hierarchy = payload.get("hierarchy") or {}
+                chapter = hierarchy.get("chapter_no") if isinstance(hierarchy, dict) else None
+                if isinstance(chapter, int):
+                    seen.add(chapter)
+            if not offset:
+                break
+        return sorted(seen)
+
+    def fetch_article_chunks(self, doc_id: str) -> List[ChunkRecord]:
+        if not doc_id:
+            return []
+        try:
+            flt = self.build_doc_id_filter([doc_id])
+        except ValueError:
+            return []
+
+        records: List[ChunkRecord] = []
+        offset = None
+        while True:
+            try:
+                points, offset = self._client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=flt,
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                )
+            except Exception:
+                logger.exception("Failed to load article chunks for %s", doc_id)
+                break
+            if not points:
+                break
+            for point in points:
+                payload = getattr(point, "payload", {}) or {}
+                records.append(self.payload_to_chunk(payload))
+            if not offset:
+                break
+
+        records.sort(key=lambda chunk: chunk.chunk_index)
+        return records
+
+    def active_collection_target(self) -> str:
+        target = self._resolve_alias(self._alias_name)
+        return target or self.collection_name
 
     def build_doc_id_filter(self, doc_ids: Sequence[str]) -> rest.Filter:
         cleaned = [doc_id for doc_id in doc_ids if doc_id]
@@ -823,7 +931,7 @@ class QdrantVectorStore:
 
     def _fetch_server_version(self) -> Optional[str]:
         base = _normalise_base_url(self._endpoint_url)
-        for path in ("/version", "/telemetry", "/readyz", "/healthz"):
+        for path in ("/telemetry", "/version", "/readyz", "/healthz"):
             candidate = _safe_request(f"{base}{path}", self._api_key)
             if candidate:
                 return candidate
