@@ -49,3 +49,37 @@ def test_legal_corpus_builder_creates_articles(tmp_path: Path) -> None:
     # Chunk identifiers must be UUID strings so they are valid Qdrant point IDs.
     uuid_obj = uuid.UUID(first_chunk.chunk_id)
     assert str(uuid_obj) == first_chunk.chunk_id
+
+
+def test_builder_detects_case_insensitive_headings(tmp_path: Path) -> None:
+    repository = DataRepository(tmp_path / "data")
+    builder = LegalCorpusBuilder(repository)
+
+    text = """
+    раздел iv. тестовый раздел
+    глава 73. проверка кейса
+    статья 1335.1. ещё одна проверка
+    Первый абзац статьи.
+    Второй абзац статьи.
+    """.strip()
+
+    document = DocumentText(
+        doc_id="lower.rtf",
+        path=repository.paths.raw / "gk_rf" / "part_4" / "lower.rtf",
+        pages=[text],
+    )
+
+    processed = builder.process_document(
+        document,
+        normalized_text=normalize_text(text),
+        chunk_size=120,
+        overlap=20,
+    )
+
+    assert processed.articles, "Expected at least one parsed article"
+    first_article = processed.articles[0]
+    assert first_article.hierarchy.chapter_no == 73
+    assert first_article.hierarchy.article_no == "1335.1"
+    assert any(
+        chunk.hierarchy.get("chapter_no") == 73 for chunk in processed.chunks
+    ), "Chunks should inherit detected chapter metadata"

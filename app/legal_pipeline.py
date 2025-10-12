@@ -29,9 +29,15 @@ except Exception:  # pragma: no cover - optional dependency not available
 
 logger = logging.getLogger(__name__)
 
-_SECTION_RE = re.compile(r"^\s*РАЗДЕЛ\s+([IVXLC]+)\.?\s*(.*)$", re.IGNORECASE)
-_CHAPTER_RE = re.compile(r"^\s*ГЛАВА\s+(\d+)\.?\s*(.*)$", re.IGNORECASE)
-_ARTICLE_RE = re.compile(r"^\s*СТАТЬЯ\s+((?:\d+(?:\.\d+)*))\.?\s*(.*)$", re.IGNORECASE)
+_SECTION_RE = re.compile(
+    r"^\s*РАЗДЕЛ\s+([IVXLC]+)\.?\s*(.*)$", re.IGNORECASE | re.MULTILINE
+)
+_CHAPTER_RE = re.compile(
+    r"^\s*ГЛАВА\s+(\d+)\.?\s*(.*)$", re.IGNORECASE | re.MULTILINE
+)
+_ARTICLE_RE = re.compile(
+    r"^\s*СТАТЬЯ\s+((?:\d+(?:\.\d+)*))\.?\s*(.*)$", re.IGNORECASE | re.MULTILINE
+)
 _AMEND_RE = re.compile(r"ред\.?\s*от\s*(\d{2}\.\d{2}\.\d{4})", re.IGNORECASE)
 _LAW_NUMBER_RE = re.compile(r"(?:N|№)\s*([0-9\-А-Яа-яA-Za-z]+)")
 _DATE_RE = re.compile(r"от\s*(\d{2}\.\d{2}\.\d{4})")
@@ -323,7 +329,9 @@ class LegalCorpusBuilder:
         level_order: List[str] = []
         for level in plan.levels:
             try:
-                compiled[level.name] = re.compile(level.regex, re.IGNORECASE)
+                compiled[level.name] = re.compile(
+                    level.regex, re.IGNORECASE | re.MULTILINE
+                )
                 level_order.append(level.name)
             except re.error as exc:
                 logger.warning("Invalid regex for level %s: %s", level.name, exc)
