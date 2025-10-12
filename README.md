@@ -1,196 +1,79 @@
-# Vector KB Assistant
+# BDlaw
 
-Vector KB Assistant is a desktop application built with PySide6 that lets you ingest local documents, store semantic embeddings in Qdrant, and ask grounded questions using OpenAI models. The application keeps all data-processing local except for calls to OpenAI for embeddings and language-model responses.
+This repository contains a minimal ingestion harness that focuses on safe, repeatable
+writes to a Qdrant vector store. The design follows a blue/green workflow so new
+collections are provisioned separately and only promoted after downstream checks.
 
-## Features
+## Key Features
 
-- Ingest PDF, DOCX, TXT, and RTF files.
-- Normalise raw legal texts and plan their section/chapter/article hierarchy automatically (LLM-assisted with cached fallbacks).
-- Chunk documents with configurable size/overlap **and** tokenizer-aware windows aligned to the embedding model.
-- Cache embeddings locally to reduce repeated costs.
-- Store chunk metadata and vectors in a Qdrant collection (local or Cloud) with deterministic UUIDv5 point IDs and per-document
-  reconciliation to guarantee idempotent re-ingests.
-- Parse Russian legal documents into Part/Chapter/Article structures with law-aware metadata and deterministic document versions.
-- Emit dual named vectors (`title_vec`, `body_vec`) for hybrid retrieval, maintain payload indexes for law-specific filters, and
-  persist chunk provenance including parser/plan versions and auditing keys.
-- Combine the named-vector searches with reciprocal-rank fusion, optional Russian keyword boosts, and interactive chapter/article filters for precise legal lookups.
-- Ask natural-language questions with answers grounded in retrieved chunks.
-- View citations and highlighted source snippets for transparency.
-- Responsive PySide6 GUI with background threads for long-running tasks.
-- Built-in health checks for OpenAI and Qdrant connectivity.
-
-## Getting Started
-
-### Prerequisites
-
-- Python 3.11
-- Access to OpenAI models `text-embedding-3-large` and a chat-capable model. The default is `gpt-4o-mini`, and the app will automatically fall back to it if another configured model is denied.
-- A running Qdrant instance. For Qdrant Cloud, copy the HTTPS endpoint and API key from the Cloud console. For local testing you can use Docker: `docker run -d --name qdrant -p 6333:6333 -v qdrant_storage:/qdrant/storage qdrant/qdrant`.
-
-### Installation
-
-The project pins all runtime dependencies to reproducible versions. The most critical ones are:
-
-| Package | Version |
-| --- | --- |
-| `qdrant-client` | 1.9.1 |
-| `httpx` | 0.27.0 |
-| `openai` | 1.30.1 |
-| `pydantic` | 2.8.2 |
-| `pymorphy2` *(optional, keyword boost lemmatisation)* | 0.9.1 |
-
-At runtime the app logs the detected Qdrant server version, the `qdrant-client` version above, and the active embedding model so the environment is always auditable.
-
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .\.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-Set your OpenAI key in the environment or through the Settings tab:
-
-```bash
-export OPENAI_API_KEY=your_key_here
-```
-
-### Running the App
-
-```bash
-python main.py
-```
-
-The first launch creates a configuration directory at `~/.vector_kb` containing `config.json`, `app.log`, and an embeddings cache.
-
-## Usage
-
-1. Open the **Settings** tab to review model names, Qdrant settings, and chunking parameters. Save any changes and optionally run the OpenAI/Qdrant tests.
-* When targeting **Qdrant Cloud**, set the Qdrant URL to the HTTPS endpoint (for example, `https://<cluster-id>.cloud.qdrant.io`) and paste the API key provided by Qdrant. The app enforces the API key for HTTPS endpoints, refuses to send it to `http://localhost`, and logs the exact host that will be used (`Using Qdrant endpoint: ...`).
-   * The collection is automatically created (or recreated) with the correct vector dimension for the configured embedding model. If you switch models, re-run ingestion with **Rebuild Collection** enabled so the schema matches the new embedding size.
-   * Query settings expose both the `Top K` result size and a `Prefilter limit`, which controls how many document ids are gathered via full-text search before the dual vector searches run.
-2. Switch to the **Ingest** tab, add documents, choose whether to rebuild the collection, and click **Create Vector DB**. Progress appears in the log pane.
-   * Ingestion normalises text into `data/staging/<corpus>/<part>/*.normalized.txt`, extracts article metadata into `*.articles.jsonl`, and writes chunk manifests under `data/chunks/.../*.chunks.jsonl` for deterministic refreshes.
-   * Each article version receives a document id such as `gkrf:part3:art1110:v2024-08-08`; re-ingesting unchanged versions is idempotent, while changed versions are deleted and re-upserted by doc id.
-   * After every batch upsert the log shows the updated Qdrant point count, the delta versus the previous run, and a verification search so you can confirm vectors are persisted.
-   * Use **Reset DB** for a one-click drop-and-recreate of the collection before a clean rebuild. The app confirms the action, recreates the named-vector schema, and logs the reset so you start from a known-good baseline.
-3. After ingestion, go to the **Ask** tab, enter a question, and click **Search & Answer**. Answers include citations, and sources display highlighted query terms. Use the chapter dropdown or article range inputs to constrain retrieval when you already know the relevant portion of the code. Each search hit exposes a **Show full article** button that stitches all of the article's chunks together for quick review.
+* **Deterministic point identifiers** – chunk payloads are hashed and converted to
+  UUIDv5 identifiers to guarantee idempotent re-ingestion.
+* **Dynamic batch sizing** – upsert batches are bounded by an estimated payload size
+  and the configured point limit to avoid `WriteTimeout` errors with large requests.
+* **Configurable transport** – gRPC can be enabled for Qdrant Cloud, along with custom
+  connection/read/write timeouts and retry budgets.
+* **Do-no-harm aliasing** – helper methods create new physical collections and swap
+  aliases atomically after validation, leaving the previous collection untouched for
+  instant rollbacks.
 
 ## Configuration
 
-The application persists configuration to `~/.vector_kb/config.json`. Any field can also be overridden via environment variables before launch.
+Runtime configuration is read from environment variables. The most important ones are:
 
-| Setting | Environment variable | Description |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `openai_api_key` | `OPENAI_API_KEY` | API key used for embeddings and chat completions. |
-| `openai_models.embedding` | `OPENAI_EMBEDDING_MODEL` | Embedding model (default `text-embedding-3-large`). |
-| `openai_models.chat` | `OPENAI_CHAT_MODEL` | Preferred chat model; the pipeline falls back to `gpt-4.1-mini` then `gpt-4o-mini` if access is denied. |
-| `qdrant.url` | `QDRANT_URL` | Qdrant endpoint. HTTPS endpoints require an API key. |
-| `qdrant.api_key` | `QDRANT_API_KEY` | API key used when the URL is HTTPS or a remote HTTP host. |
-| `qdrant.collection` | `QDRANT_COLLECTION` | Collection name (default `kb_docs_v1`). |
-| `qdrant.upsert_batch_size` | `QDRANT_UPSERT_BATCH_SIZE` | Legacy count-based fallback for upserts (dynamic sizing uses bytes). |
-| `qdrant.timeout_seconds` | `QDRANT_TIMEOUT_SECONDS` | Legacy timeout (per-request overrides are also available). |
-| `qdrant.prefer_grpc` | `QDRANT_PREFER_GRPC` | Prefer gRPC connections (defaults to `true`). |
-| `qdrant.grpc_port` | `QDRANT_GRPC_PORT` | Port used for gRPC (defaults to `6334`). |
-| `qdrant.connect_timeout_seconds` | `QDRANT_CONNECT_TIMEOUT` | Connection timeout when talking to Qdrant. |
-| `qdrant.read_timeout_seconds` | `QDRANT_READ_TIMEOUT` | Read timeout for Qdrant operations. |
-| `qdrant.write_timeout_seconds` | `QDRANT_WRITE_TIMEOUT` | Write timeout for Qdrant operations. |
-| `qdrant.target_batch_bytes` | `INGEST_TARGET_BATCH_BYTES` | Target HTTP payload size per upsert batch (default 2 MB). |
-| `qdrant.max_retries` | `QDRANT_MAX_RETRIES` | Maximum timeout retries per batch (default 5). |
-| `qdrant.retry_initial_delay` | `QDRANT_RETRY_INITIAL_DELAY` | Initial delay (seconds) before retrying a timed-out batch. |
-| `qdrant.retry_max_delay` | `QDRANT_RETRY_MAX_DELAY` | Maximum backoff delay between retries. |
-| `qdrant.upsert_wait` | `QDRANT_UPSERT_WAIT` | Whether to wait for indexing confirmation (`false` by default). |
-| `qdrant.upsert_ordering` | `QDRANT_UPSERT_ORDERING` | Write ordering hint passed to Qdrant (`weak` by default). |
-| `qdrant.title_max_chars` | `TEXT_TITLE_MAX` | Maximum characters persisted for `title_text` payloads (default 256). |
-| `qdrant.preview_max_chars` | `TEXT_PREVIEW_MAX` | Maximum characters persisted for `body_text` previews (default 1200). |
-| `ingest.chunk_size_chars` | `CHUNK_SIZE` | Target chunk size. |
-| `ingest.chunk_overlap_chars` | `CHUNK_OVERLAP` | Character overlap between chunks. |
-| `query.top_k` | `QUERY_TOP_K` | Maximum number of chunks returned per query. |
-| `query.prefilter_limit` | `QUERY_PREFILTER_LIMIT` | Candidate budget for keyword prefiltering. |
-| `query.fusion_weight_title` | `FUSION_WEIGHT_TITLE` | Weight applied to title-vector rankings during fusion. |
-| `query.fusion_weight_body` | `FUSION_WEIGHT_BODY` | Weight applied to body-vector rankings during fusion. |
-| `query.fusion_rrf_k` | `FUSION_RRF_K` | `k` constant in reciprocal-rank fusion. |
-| `query.as_of_start_date` | `QUERY_AS_OF_START` | Optional lower bound for temporal filtering (ISO date). |
-| `query.as_of_date` | `QUERY_AS_OF_DATE` | Optional upper bound (“as-of” date) for temporal filtering. |
-| `query.status_filter` | `QUERY_STATUS` | Status filter applied to `law_meta.status` (default `active`). |
+| `QDRANT_URL` | `http://localhost:6333` | Qdrant endpoint (HTTP or HTTPS). |
+| `QDRANT_USE_GRPC` | `true` | Prefer gRPC if the server exposes it. |
+| `QDRANT_GRPC_PORT` | `6334` | gRPC port. |
+| `QDRANT_CONNECT_TIMEOUT` | `30` | Connection timeout (seconds). |
+| `QDRANT_READ_TIMEOUT` | `120` | Read timeout (seconds). |
+| `QDRANT_WRITE_TIMEOUT` | `120` | Write timeout (seconds). |
+| `INGEST_TARGET_BATCH_BYTES` | `800000` | Target maximum batch payload size in bytes. |
+| `BATCH_POINTS_MAX` | `32` | Maximum points per batch. |
+| `INGEST_MAX_RETRIES` | `5` | Retry attempts for timeout failures. |
+| `QDRANT_ALIAS` | `GK_RF2` | Stable alias to swap after validation. |
 
-## Troubleshooting
+## Usage
 
-- **OpenAI model access errors**: On the first question the app probes the configured chat model and two fallbacks (`gpt-4.1-mini`, `gpt-4o-mini`). If none are accessible you will see a clear error asking you to change the Chat Model in Settings.
-- **Qdrant collection stays empty**: Confirm the ingestion log includes `[UPSERT]` lines with the expected batch sizes and `dim`. Afterwards the log prints `[QDRANT] total points now: <count>`; if the count does not rise, re-check the configured endpoint and API key.
-- **Re-ingesting adds duplicates**: Point IDs are deterministic. If counts climb unexpectedly, enable **Rebuild Collection** to clear stale data and rerun ingestion.
+The `IngestService` class accepts pre-computed chunk information and streams it to a new
+Qdrant collection:
 
-## Data pipeline and storage layout
+```python
+from app.ingest import Chunk, IngestService
 
-```
-data/
-  raw/                # Original source files supplied by the user
-  staging/            # Normalised text + per-article JSONL files
-  chunks/             # Chunk JSONL + manifest files used for deterministic refresh
-  snapshots/          # Exported Qdrant snapshot files
-  logs/               # Verification transcripts and additional logs
+service = IngestService()
+collection = service.ingest(
+    vector_dim=3072,
+    chunks=[
+        Chunk(
+            doc_id="gkrf:part1:art1:v2018-05-23",
+            text="Статья 1. Основные начала ...",
+            vector=[0.0] * 3072,
+            metadata={
+                "hierarchy": {"part_no": 1, "chapter_no": 1, "article_no_int": 1},
+                "law_meta": {"status": "active", "enact_date_int": 20180523},
+            },
+        )
+    ],
+)
+print("New collection:", collection)
 ```
 
-Each staging JSON record preserves the legal hierarchy (Part/Chapter/Article) along with law numbers, enact dates, and amendment metadata. Chunk JSON lines store the chunk hash, deterministic UUID, and named-vector texts ready for embedding. Payload metadata stores the original file name and relative path within `data/raw` so the corpus can be moved between machines without leaking absolute host paths.
+After external verification succeeds, call `SafeQdrantClient.finalize_collection()` to
+point the alias at the new collection. This keeps the previous collection available for
+immediate rollback.
 
-## Qdrant schema
+## Testing
 
-The application creates (or recreates) the collection with two named vectors per point:
-
-```
-{
-  "vectors": {
-    "title_vec": {"size": 3072, "distance": "Cosine"},
-    "body_vec":  {"size": 3072, "distance": "Cosine"}
-  }
-}
-```
-
-Payload indexes are installed for `doc_id`, the legal hierarchy fields, law status and amendment date, and for full-text search over `title_text` and `body_text`. Hybrid retrieval first applies a keyword filter, runs vector search on both named vectors, and fuses the results using reciprocal-rank fusion with configurable weights. Temporal filters derived from `QUERY_STATUS`, `QUERY_AS_OF_START`, and `QUERY_AS_OF_DATE` ensure answers respect “as-of” queries.
-When the optional `pymorphy2` dependency is present you can enable `KEYWORD_BOOST_WEIGHT` to lemmatise Russian search terms and reward chunks that contain the same lemmas. If the library is absent the boost gracefully falls back to lower-cased token comparisons.
-
-## Exporting the vector database
-
-1. **Snapshot (recommended)**
-
-   ```bash
-   python snapshots.py create
-   ```
-
-   The script calls `create_snapshot` then downloads the file into `snapshots/` (or a path provided via `--output`). Restore with:
-
-   ```bash
-   python snapshots.py restore snapshots/kb_docs_v1-YYYY-MM-DD-HHMMSS.snapshot
-   ```
-
-   Restores automatically trigger the verification suite; the command fails if reference queries or self-hit checks regress.
-
-2. **Physical copy** – stop Qdrant and copy `~/.qdrant/storage/collections/kb_docs_v1` to another machine with the same Qdrant version.
-
-## Tests
-
-Run the test suite with:
+The repository ships with unit tests that cover the batching logic and deterministic ID
+helpers:
 
 ```bash
-pytest
+pip install -r requirements.txt
+PYTHONPATH=. pytest -q
 ```
 
-## Logging
+---
 
-Application logs are written to `~/.vector_kb/app.log` and streamed into the GUI log view during ingestion and queries.
-
-## Verification & diagnostics helpers
-
-The repository ships a suite of scripts to automate ingestion validation and maintenance:
-
-- `python debug_qdrant.py` prints the configured collections and the current point count for `kb_docs_v1`. It honours the values saved in the app settings and optional `QDRANT_URL`, `QDRANT_API_KEY`, and `QDRANT_COLLECTION` environment overrides.
-- `python e2e_embed_upsert_test.py` recreates a scratch collection named `<collection>_debug`, uploads a single freshly generated embedding, verifies the count reaches 1, and performs a retrieval sanity check (limit 3). This is an easy way to confirm your OpenAI credentials, embedding dimension, and Qdrant endpoint all work together outside the GUI.
-- `python search_api.py "your question" --pretty` runs the hybrid retrieval pipeline (keyword prefilter + dual named vectors) and prints the top-ranked chunks without invoking the chat model.
-- `python verify.py` executes the end-to-end smoke checks described in the playbook: reference legal queries, self-hit tests for random articles, and empty-collection detection. The command exits with a non-zero status if any check fails.
-- `python tools/backfill_chapters.py --normalized-path data/users.normalized.txt` derives chapter metadata from the normalised corpus and patches any stored points missing `hierarchy.chapter_no` without downtime. Run this once after upgrading from older releases that lacked case-insensitive chapter parsing.
-- `python tools/verify_post_ingest.py` performs a lightweight structural audit (count checks, missing chapter detection, optional smoke chapter queries) and is suitable for CI pipelines. Configure `EXPECTED_POINTS` or `SMOKE_CHAPTER` via environment variables when required.
-- `python tools/dump_stats.py` prints total point counts and per-chapter breakdowns to help during manual QA sessions.
-
-All scripts log the endpoint in use so you can confirm that Cloud URLs are respected and that the pinned dependency versions are active.
-
-## License
-
-This project is provided as-is for demonstration purposes.
+This minimal foundation can be extended with document parsing, GPT-based auto-structuring,
+and snapshot tooling as required by production ingest pipelines.

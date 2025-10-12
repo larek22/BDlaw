@@ -1,7 +1,4 @@
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
 .env
 .venv/
-.vector_kb/
