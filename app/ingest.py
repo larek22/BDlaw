@@ -93,6 +93,26 @@ class IngestService:
             else:
                 logger.info("Committed manifest %s", final)
 
+    def _cleanup_pending_manifests(
+        self, processed_documents: Sequence[ProcessedDocument]
+    ) -> None:
+        """Remove transient pending manifests when no ingestion occurs."""
+
+        seen: set[Path] = set()
+        for processed in processed_documents:
+            pending = getattr(processed, "pending_manifest_path", None)
+            if not pending or pending in seen:
+                continue
+            seen.add(pending)
+            try:
+                pending.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:  # pragma: no cover - filesystem errors rare in tests
+                logger.warning("Failed to remove pending manifest %s: %s", pending, exc)
+            else:
+                logger.info("Removed stale pending manifest %s", pending)
+
     def ingest(
         self,
         paths: Sequence[Path],
@@ -185,9 +205,48 @@ class IngestService:
             level=logging.INFO,
         )
 
+        forced_reingest = False
         if not changed_chunks:
-            self._commit_pending_manifests(processed_documents)
-            return IngestStats(files_processed=0, chunks_created=0, skipped=skipped)
+            if (
+                self.settings.ingest.force_reingest_if_empty
+                and processed_documents
+            ):
+                try:
+                    active_points = self.vector_store.count_points()
+                except Exception as exc:
+                    logger.warning(
+                        "Unable to check active collection size for re-ingest decision: %s",
+                        exc,
+                    )
+                else:
+                    if active_points == 0:
+                        forced_reingest = True
+                        report(
+                            "Active collection empty but manifests unchanged; forcing re-ingest",
+                            level=logging.WARNING,
+                        )
+                        changed_chunks = [
+                            chunk
+                            for processed in processed_documents
+                            for chunk in processed.chunks
+                        ]
+                        if changed_chunks:
+                            changed_doc_ids = set(doc_expected_counts.keys())
+                            for chunk in changed_chunks:
+                                chunk.chunk_id = make_point_id(
+                                    chunk.doc_id,
+                                    chunk.chunk_index,
+                                )
+                            report(
+                                f"Force re-ingest will process {len(changed_doc_ids)} document(s) "
+                                f"covering {len(changed_chunks)} chunk(s)",
+                                level=logging.INFO,
+                            )
+                        else:
+                            forced_reingest = False
+            if not forced_reingest:
+                self._cleanup_pending_manifests(processed_documents)
+                return IngestStats(files_processed=0, chunks_created=0, skipped=skipped)
 
         embedding_model = self.settings.openai_models.embedding
         report(

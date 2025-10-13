@@ -95,6 +95,9 @@ class IngestSettings(BaseModel):
     atomic_alias_swap: bool = Field(default_factory=lambda: _env_bool("INGEST_ATOMIC_ALIAS_SWAP", True))
     dry_run: bool = Field(default_factory=lambda: _env_bool("INGEST_DRY_RUN", False))
     enable_new_loaders: bool = Field(default_factory=lambda: _env_bool("INGEST_ENABLE_NEW_LOADERS", False))
+    force_reingest_if_empty: bool = Field(
+        default_factory=lambda: _env_bool("INGEST_FORCE_REINGEST_IF_EMPTY", True)
+    )
 
     model_config = {"extra": "ignore", "validate_assignment": True}
 
