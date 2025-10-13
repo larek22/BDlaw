@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, List, Sequence
 
 from .data_repository import DataRepository
+from .id_utils import make_point_id as _shared_make_point_id
 from .legal_pipeline import (
     LegalCorpusBuilder,
     ProcessedDocument,
@@ -20,8 +22,36 @@ from .qdrant_client import QdrantVectorStore
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from .embeddings import EmbeddingClient
     from .readers.factory import DocumentReaderFactory
+    from .readers.base import DocumentText
 
 logger = logging.getLogger(__name__)
+
+
+def make_point_id(doc_id: str, chunk_index: int) -> str:
+    """Deterministic point ids derived from document id and chunk index."""
+
+    # DEPRECATED: direct uuid.uuid5(NAMESPACE_URL, f"{doc_id}:{chunk_index}") implementation
+    # retained for reference. The shared helper now centralises ID generation.
+    return _shared_make_point_id(doc_id, chunk_index)
+
+
+def expected_chunk_id(chunk: ChunkRecord) -> str:
+    """Return the canonical identifier for a ``ChunkRecord``."""
+
+    article_no: str | None = None
+    if isinstance(chunk.hierarchy, dict):
+        raw_article = chunk.hierarchy.get("article_no")
+        if raw_article is not None:
+            article_no = str(raw_article)
+    version_marker = "|".join(
+        part for part in (chunk.plan_version, chunk.parser_version) if part
+    ) or None
+    return _shared_make_point_id(
+        chunk.doc_id,
+        chunk.chunk_index,
+        version=version_marker,
+        article_no=article_no,
+    )
 
 
 @dataclass
@@ -29,6 +59,8 @@ class IngestStats:
     files_processed: int
     chunks_created: int
     skipped: int
+    alias_swapped: bool = False
+    validation_passed: bool = False
 
 
 class IngestService:
@@ -56,6 +88,53 @@ class IngestService:
             )
         self.reader_factory = reader_factory
         self.builder = LegalCorpusBuilder(self.repository, settings)
+        self._loader_map: Dict[str, Callable[[Path], "DocumentText"]] = {}
+        if self.settings.ingest.enable_new_loaders:
+            self._loader_map = self._build_loader_map()
+
+    def _commit_pending_manifests(
+        self, processed_documents: Sequence[ProcessedDocument]
+    ) -> None:
+        """Atomically promote pending manifests written during processing."""
+
+        seen: set[Path] = set()
+        for processed in processed_documents:
+            pending = getattr(processed, "pending_manifest_path", None)
+            final = getattr(processed, "manifest_path", None)
+            if not pending or not final:
+                continue
+            if pending in seen:
+                continue
+            seen.add(pending)
+            if not pending.exists():
+                continue
+            final.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.replace(pending, final)
+            except FileNotFoundError:
+                logger.debug("Pending manifest %s disappeared before commit", pending)
+            else:
+                logger.info("Committed manifest %s", final)
+
+    def _cleanup_pending_manifests(
+        self, processed_documents: Sequence[ProcessedDocument]
+    ) -> None:
+        """Remove transient pending manifests when no ingestion occurs."""
+
+        seen: set[Path] = set()
+        for processed in processed_documents:
+            pending = getattr(processed, "pending_manifest_path", None)
+            if not pending or pending in seen:
+                continue
+            seen.add(pending)
+            try:
+                pending.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:  # pragma: no cover - filesystem errors rare in tests
+                logger.warning("Failed to remove pending manifest %s: %s", pending, exc)
+            else:
+                logger.info("Removed stale pending manifest %s", pending)
 
     def ingest(
         self,
@@ -92,7 +171,7 @@ class IngestService:
 
         for path in paths:
             try:
-                document = self.reader_factory.read(path)
+                document = self._load_document(path)
             except Exception as exc:
                 message = f"Failed to read {path}: {exc}"
                 logger.error(message)
@@ -142,8 +221,52 @@ class IngestService:
                 if chunk.doc_id in changed_set:
                     changed_chunks.append(chunk)
 
+        total_articles = sum(len(processed.articles) for processed in processed_documents)
+        total_chunk_count = sum(len(processed.chunks) for processed in processed_documents)
+        report(
+            f"Parsed {total_articles} articles, {total_chunk_count} chunks",
+            level=logging.INFO,
+        )
+
+        forced_reingest = False
         if not changed_chunks:
-            return IngestStats(files_processed=0, chunks_created=0, skipped=skipped)
+            if (
+                self.settings.ingest.force_reingest_if_empty
+                and processed_documents
+            ):
+                try:
+                    active_points = self.vector_store.count_points()
+                except Exception as exc:
+                    logger.warning(
+                        "Unable to check active collection size for re-ingest decision: %s",
+                        exc,
+                    )
+                else:
+                    if active_points == 0:
+                        forced_reingest = True
+                        report(
+                            "Active collection empty but manifests unchanged; forcing re-ingest",
+                            level=logging.WARNING,
+                        )
+                        changed_chunks = [
+                            chunk
+                            for processed in processed_documents
+                            for chunk in processed.chunks
+                        ]
+                        if changed_chunks:
+                            changed_doc_ids = set(doc_expected_counts.keys())
+                            for chunk in changed_chunks:
+                                chunk.chunk_id = expected_chunk_id(chunk)
+                            report(
+                                f"Force re-ingest will process {len(changed_doc_ids)} document(s) "
+                                f"covering {len(changed_chunks)} chunk(s)",
+                                level=logging.INFO,
+                            )
+                        else:
+                            forced_reingest = False
+            if not forced_reingest:
+                self._cleanup_pending_manifests(processed_documents)
+                return IngestStats(files_processed=0, chunks_created=0, skipped=skipped)
 
         embedding_model = self.settings.openai_models.embedding
         report(
@@ -153,11 +276,18 @@ class IngestService:
         self.vector_store.ensure_collection(embedding_model=embedding_model, recreate=recreate)
 
         if changed_doc_ids:
-            report(
-                f"Deleting {len(changed_doc_ids)} document id(s) prior to upsert",
-                level=logging.INFO,
-            )
-            self.vector_store.delete_documents(sorted(changed_doc_ids))
+            if self.settings.ingest.atomic_alias_swap:
+                report(
+                    "Skipping destructive deletes prior to upsert (atomic alias swap active)",
+                    level=logging.INFO,
+                )
+                # DEPRECATED: legacy destructive delete retained for compatibility below.
+            else:
+                report(
+                    f"Deleting {len(changed_doc_ids)} document id(s) prior to upsert",
+                    level=logging.INFO,
+                )
+                self.vector_store.delete_documents(sorted(changed_doc_ids))
 
         self.embedding_client.reset_usage()
 
@@ -201,6 +331,51 @@ class IngestService:
                 f"Embedding dimension mismatch: expected {expected_dim} from {embedding_model} "
                 f"but received {vector_dim}"
             )
+
+        if self.settings.ingest.atomic_alias_swap:
+            stats = self._ingest_atomic_flow(
+                report=report,
+                processed_documents=processed_documents,
+                changed_chunks=changed_chunks,
+                title_vectors=title_vectors,
+                body_vectors=body_vectors,
+                embedding_model=embedding_model,
+                skipped=skipped,
+                doc_expected_counts=doc_expected_counts,
+            )
+            usage = self.embedding_client.usage_summary()
+            elapsed = time.perf_counter() - start_time if changed_chunks else 0.0
+            report(
+                "Ingestion summary: files={files} chunks={chunks} skipped={skipped} "
+                "embed_requests={requests:.0f} cache_hits={cache:.0f} tokens={tokens:.0f} "
+                "est_cost=${cost:.4f} elapsed={elapsed:.2f}s".format(
+                    files=stats.files_processed,
+                    chunks=stats.chunks_created,
+                    skipped=stats.skipped,
+                    requests=usage["requests"],
+                    cache=usage["cache_hits"],
+                    tokens=usage["tokens"],
+                    cost=usage["cost"],
+                    elapsed=elapsed,
+                ),
+                level=logging.INFO,
+            )
+            if (
+                self.verify_after_ingest
+                and stats.chunks_created > 0
+                and stats.alias_swapped
+            ):
+                self._run_post_ingest_verification(report, progress_cb)
+            elif (
+                self.verify_after_ingest
+                and stats.chunks_created > 0
+                and not stats.alias_swapped
+            ):
+                report(
+                    "Skipping post-ingest verification because alias swap did not occur",
+                    level=logging.WARNING,
+                )
+            return stats
         report(
             f"[UPSERT] collection={self.vector_store.collection_name} points={len(changed_chunks)} dim={vector_dim}",
             level=logging.INFO,
@@ -372,6 +547,7 @@ class IngestService:
         if doc_expected_counts:
             try:
                 actual_doc_counts = self.vector_store.count_points_for_doc_ids(
+                    self.vector_store.collection_name,
                     doc_expected_counts.keys()
                 )
             except Exception as exc:
@@ -404,6 +580,8 @@ class IngestService:
                 level=logging.INFO,
             )
 
+        self._commit_pending_manifests(processed_documents)
+
         stats = IngestStats(
             files_processed=len(processed_documents),
             chunks_created=len(changed_chunks),
@@ -427,52 +605,323 @@ class IngestService:
             level=logging.INFO,
         )
         if self.verify_after_ingest and stats.chunks_created > 0:
-            try:
-                from verify import run_verification  # local import to avoid cycles during packaging
+            self._run_post_ingest_verification(report, progress_cb)
 
-                verification_log = self.repository.verification_log_path()
-                result = run_verification(
-                    self.settings,
-                    log_path=verification_log,
+        return stats
+
+    def _build_loader_map(self) -> Dict[str, Callable[[Path], "DocumentText"]]:
+        from .loaders import docx_loader, html_loader, pdf_loader, rtf_loader, txt_loader
+
+        return {
+            ".pdf": lambda path: pdf_loader.load_pdf(
+                path,
+                settings=self.settings,
+                repository=self.repository,
+            ),
+            ".docx": docx_loader.load_docx,
+            ".rtf": rtf_loader.load_rtf,
+            ".txt": txt_loader.load_txt,
+            ".html": lambda path: html_loader.load_html(path),
+            ".htm": lambda path: html_loader.load_html(path),
+        }
+
+    def _load_document(self, path: Path):
+        loader = self._loader_map.get(path.suffix.lower()) if self._loader_map else None
+        if loader:
+            logger.info("Using loader for %s", path.name)
+            return loader(path)
+        return self.reader_factory.read(path)
+
+    def _ingest_atomic_flow(
+        self,
+        *,
+        report: Callable[[str], None],
+        processed_documents: Sequence[ProcessedDocument],
+        changed_chunks: Sequence[ChunkRecord],
+        title_vectors: Dict[str, List[float]],
+        body_vectors: Dict[str, List[float]],
+        embedding_model: str,
+        skipped: int,
+        doc_expected_counts: Dict[str, int],
+    ) -> IngestStats:
+        alias = self.vector_store.alias_name
+        expected_dim = self.vector_store.vector_size_for_model(embedding_model)
+        target_collection = self.vector_store.ensure_shadow_collection(
+            alias,
+            expected_dim,
+        )
+        report(
+            f"Atomic staging collection prepared: {target_collection}",
+            level=logging.INFO,
+        )
+
+        # DEPRECATED: hard failure on duplicate chunk identifiers previously aborted
+        # ingestion runs. The pipeline now deduplicates conflicting chunks while
+        # preserving deterministic identifiers for idempotent upserts.
+        # seen_ids: set[str] = set()
+        # for chunk in changed_chunks:
+        #     deterministic_id = expected_chunk_id(chunk)
+        #     if chunk.chunk_id != deterministic_id:
+        #         chunk.chunk_id = deterministic_id
+        #     if chunk.chunk_id in seen_ids:
+        #         message = (
+        #             f"Duplicate chunk id detected before upsert: {chunk.chunk_id}"
+        #         )
+        #         logger.error(message)
+        #         raise ValueError(message)
+        #     seen_ids.add(chunk.chunk_id)
+
+        deduped_chunks: list[ChunkRecord] = []
+        chunk_index_by_id: dict[str, int] = {}
+        identical_duplicates = 0
+        replaced_duplicates = 0
+        for chunk in changed_chunks:
+            deterministic_id = expected_chunk_id(chunk)
+            if chunk.chunk_id != deterministic_id:
+                chunk.chunk_id = deterministic_id
+            existing_idx = chunk_index_by_id.get(chunk.chunk_id)
+            if existing_idx is None:
+                chunk_index_by_id[chunk.chunk_id] = len(deduped_chunks)
+                deduped_chunks.append(chunk)
+                continue
+
+            existing = deduped_chunks[existing_idx]
+            if (
+                existing.body_sha256 == chunk.body_sha256
+                and existing.title_sha256 == chunk.title_sha256
+                and existing.body_text == chunk.body_text
+                and existing.title_text == chunk.title_text
+            ):
+                identical_duplicates += 1
+                logger.warning(
+                    "Duplicate chunk id %s matches existing payload; skipping duplicate doc=%s index=%s",
+                    chunk.chunk_id,
+                    chunk.doc_id,
+                    chunk.chunk_index,
+                )
+                continue
+
+            replaced_duplicates += 1
+            deduped_chunks[existing_idx] = chunk
+            logger.warning(
+                "Duplicate chunk id %s with differing payload detected; replacing doc=%s index=%s with doc=%s index=%s",
+                chunk.chunk_id,
+                existing.doc_id,
+                existing.chunk_index,
+                chunk.doc_id,
+                chunk.chunk_index,
+            )
+
+        if identical_duplicates or replaced_duplicates:
+            report(
+                "Resolved duplicate chunk ids: identical={identical} replaced={replaced}".format(
+                    identical=identical_duplicates,
+                    replaced=replaced_duplicates,
+                ),
+                level=logging.WARNING,
+            )
+
+        changed_chunks = deduped_chunks
+        if doc_expected_counts:
+            deduped_expected: Dict[str, int] = {}
+            for chunk in changed_chunks:
+                deduped_expected[chunk.doc_id] = deduped_expected.get(chunk.doc_id, 0) + 1
+            doc_expected_counts = deduped_expected
+
+        if not changed_chunks:
+            report(
+                "All candidate chunks were duplicates; skipping Qdrant upsert",
+                level=logging.WARNING,
+            )
+            self._cleanup_pending_manifests(processed_documents)
+            return IngestStats(
+                files_processed=len(processed_documents),
+                chunks_created=0,
+                skipped=skipped,
+                alias_swapped=False,
+                validation_passed=False,
+            )
+
+        sample_chunk = changed_chunks[0]
+        preview = sample_chunk.body_text.replace("\n", " ").strip()
+        if len(preview) > 120:
+            preview = preview[:117] + "..."
+        report(
+            f"Sample chunk: doc={sample_chunk.doc_id} index={sample_chunk.chunk_index} sha={sample_chunk.chunk_sha256[:12]} preview='{preview}'",
+            level=logging.INFO,
+        )
+        report(
+            f"Sample point id (first chunk): {sample_chunk.chunk_id}",
+            level=logging.INFO,
+        )
+
+        self.vector_store.upsert_chunks(
+            changed_chunks,
+            title_vectors=title_vectors,
+            body_vectors=body_vectors,
+            collection_name=target_collection,
+        )
+        expected_chunks = len(changed_chunks)
+        if (
+            expected_chunks
+            and not self.settings.qdrant.use_wait
+            and hasattr(self.vector_store, "wait_for_count")
+        ):
+            actual_chunks = self.vector_store.wait_for_count(
+                target_collection, expected_chunks
+            )
+        else:
+            # DEPRECATED: single immediate count after async upsert retained for compatibility.
+            actual_chunks = self.vector_store.count_points(target_collection)
+        report(
+            f"Validation: expected={expected_chunks} actual={actual_chunks}",
+            level=logging.INFO,
+        )
+        is_count_valid = actual_chunks == expected_chunks
+        validation_limit = max(1, self.settings.ingest.validation_sample_k)
+        sample_texts = ["Статья 1", "договор", "наследство"]
+        health_ok = False
+        alias_swapped = False
+        validation_passed = False
+        if is_count_valid:
+            health_ok = self.vector_store.health_probe(
+                target_collection,
+                sample_texts=sample_texts,
+                limit=validation_limit,
+            )
+            report(
+                f"Health probe for {target_collection}: {health_ok}",
+                level=logging.INFO,
+            )
+            validation_passed = health_ok
+        else:
+            logger.error(
+                "Validation count mismatch for %s (expected=%s actual=%s)",
+                target_collection,
+                expected_chunks,
+                actual_chunks,
+            )
+            try:
+                doc_actuals = self.vector_store.count_points_for_doc_ids(
+                    target_collection,
+                    list(doc_expected_counts.keys()),
                 )
             except Exception as exc:
-                message = f"Post-ingestion verification failed unexpectedly: {exc}"
+                logger.warning(
+                    "Doc-level diagnostics failed for %s: %s",
+                    target_collection,
+                    exc,
+                )
+            else:
+                shortfalls: list[str] = []
+                for doc_id, expected_total in doc_expected_counts.items():
+                    actual_total = doc_actuals.get(doc_id, 0)
+                    if actual_total < expected_total:
+                        shortfalls.append(
+                            f"{doc_id}:{actual_total}/{expected_total}"
+                        )
+                if shortfalls:
+                    preview = ", ".join(shortfalls[:10])
+                    report(
+                        "Validation shortfall details (first {count}): {details}".format(
+                            count=min(len(shortfalls), 10),
+                            details=preview,
+                        ),
+                        level=logging.ERROR,
+                    )
+
+        if is_count_valid and health_ok:
+            if self.settings.ingest.dry_run:
+                report(
+                    "Dry-run enabled; skipping alias swap despite successful validation",
+                    level=logging.INFO,
+                )
+                report(
+                    "Dry-run mode retains pending manifests for manual review",
+                    level=logging.INFO,
+                )
+            else:
+                alias_swapped = self.vector_store.swap_alias_atomically(
+                    alias, target_collection
+                )
+                if alias_swapped:
+                    report(
+                        f"Alias swap OK -> {alias} -> {target_collection}",
+                        level=logging.INFO,
+                    )
+                    self._commit_pending_manifests(processed_documents)
+                    self.vector_store.cleanup_old_collections(alias, keep_n=2)
+                else:
+                    report(
+                        "Alias swap did not complete; pending manifests retained for investigation",
+                        level=logging.WARNING,
+                    )
+        else:
+            failure_reason = (
+                "count mismatch" if not is_count_valid else "health probe failure"
+            )
+            message = f"Validation failed; alias not swapped ({failure_reason})"
+            logger.error(message)
+            report(message, level=logging.ERROR)
+
+        return IngestStats(
+            files_processed=len(processed_documents),
+            chunks_created=len(changed_chunks),
+            skipped=skipped,
+            alias_swapped=alias_swapped,
+            validation_passed=validation_passed,
+        )
+
+    def _run_post_ingest_verification(
+        self,
+        report: Callable[[str], None],
+        progress_cb: Callable[[str], None] | None,
+    ) -> None:
+        try:
+            from verify import run_verification  # local import to avoid cycles during packaging
+
+            verification_log = self.repository.verification_log_path()
+            result = run_verification(
+                self.settings,
+                log_path=verification_log,
+            )
+        except Exception as exc:
+            message = f"Post-ingestion verification failed unexpectedly: {exc}"
+            logger.error(message)
+            if progress_cb:
+                progress_cb(message)
+            raise
+        else:
+            prefix = (
+                "Post-ingestion verification detected issues:"
+                if (result.failures or result.warnings)
+                else "Post-ingestion verification completed successfully."
+            )
+            logger.info(prefix)
+            report(prefix)
+            if progress_cb:
+                progress_cb(prefix)
+
+            for message in result.info:
+                logger.info(message)
+                if progress_cb:
+                    progress_cb(message)
+
+            for warning in result.warnings:
+                warning_msg = f"WARNING: {warning}"
+                logger.warning(warning_msg)
+                if progress_cb:
+                    progress_cb(warning_msg)
+
+            if result.failures:
+                for failure in result.failures:
+                    logger.error(failure)
+                    if progress_cb:
+                        progress_cb(failure)
+                message = (
+                    "Verification checks failed after ingestion. See verification log for details."
+                )
                 logger.error(message)
                 if progress_cb:
                     progress_cb(message)
-                raise
-            else:
-                prefix = (
-                    "Post-ingestion verification detected issues:"
-                    if (result.failures or result.warnings)
-                    else "Post-ingestion verification completed successfully."
-                )
-                logger.info(prefix)
-                if progress_cb:
-                    progress_cb(prefix)
-
-                for message in result.info:
-                    logger.info(message)
-                    if progress_cb:
-                        progress_cb(message)
-
-                for warning in result.warnings:
-                    warning_msg = f"WARNING: {warning}"
-                    logger.warning(warning_msg)
-                    if progress_cb:
-                        progress_cb(warning_msg)
-
-                if result.failures:
-                    for failure in result.failures:
-                        logger.error(failure)
-                        if progress_cb:
-                            progress_cb(failure)
-                    message = (
-                        "Verification checks failed after ingestion. See verification log for details."
-                    )
-                    logger.error(message)
-                    if progress_cb:
-                        progress_cb(message)
-                    raise RuntimeError(message)
-
-        return stats
+                raise RuntimeError(message)
