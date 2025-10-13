@@ -35,6 +35,25 @@ def make_point_id(doc_id: str, chunk_index: int) -> str:
     return _shared_make_point_id(doc_id, chunk_index)
 
 
+def expected_chunk_id(chunk: ChunkRecord) -> str:
+    """Return the canonical identifier for a ``ChunkRecord``."""
+
+    article_no: str | None = None
+    if isinstance(chunk.hierarchy, dict):
+        raw_article = chunk.hierarchy.get("article_no")
+        if raw_article is not None:
+            article_no = str(raw_article)
+    version_marker = "|".join(
+        part for part in (chunk.plan_version, chunk.parser_version) if part
+    ) or None
+    return _shared_make_point_id(
+        chunk.doc_id,
+        chunk.chunk_index,
+        version=version_marker,
+        article_no=article_no,
+    )
+
+
 @dataclass
 class IngestStats:
     files_processed: int
@@ -237,10 +256,7 @@ class IngestService:
                         if changed_chunks:
                             changed_doc_ids = set(doc_expected_counts.keys())
                             for chunk in changed_chunks:
-                                chunk.chunk_id = make_point_id(
-                                    chunk.doc_id,
-                                    chunk.chunk_index,
-                                )
+                                chunk.chunk_id = expected_chunk_id(chunk)
                             report(
                                 f"Force re-ingest will process {len(changed_doc_ids)} document(s) "
                                 f"covering {len(changed_chunks)} chunk(s)",
@@ -641,7 +657,7 @@ class IngestService:
 
         seen_ids: set[str] = set()
         for chunk in changed_chunks:
-            deterministic_id = make_point_id(chunk.doc_id, chunk.chunk_index)
+            deterministic_id = expected_chunk_id(chunk)
             if chunk.chunk_id != deterministic_id:
                 chunk.chunk_id = deterministic_id
             if chunk.chunk_id in seen_ids:
