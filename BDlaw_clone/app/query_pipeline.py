@@ -233,16 +233,6 @@ class QueryPipeline:
         if temporal_filter:
             filters.append(temporal_filter)
 
-        if getattr(self.settings.query, "enable_law_filters", True) and hasattr(
-            self.vector_store, "build_law_filter"
-        ):
-            law_filter = self.vector_store.build_law_filter(
-                as_of_date=self.settings.query.as_of_date,
-                in_force_only=True,
-            )
-            if law_filter:
-                filters.append(law_filter)
-
         return self.vector_store.combine_filters(*filters)
 
     def _tokenize_query(self, query: str) -> List[str]:

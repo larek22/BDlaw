@@ -235,14 +235,6 @@ class LegalCorpusBuilder:
         self.tokenizer = self._load_tokenizer(self.settings.chunking.tokenizer)
 
     def _load_tokenizer(self, name: str):
-        class _CharacterTokenizer:
-            def encode(self, text: str, disallowed_special=None):  # pragma: no cover - trivial fallback
-                return [ord(ch) for ch in text]
-
-            def decode(self, tokens: List[int]) -> str:  # pragma: no cover - trivial fallback
-                return "".join(chr(token) for token in tokens)
-
-        fallback = _CharacterTokenizer()
         if tiktoken is not None:
             try:
                 return tiktoken.get_encoding(name)
@@ -257,7 +249,15 @@ class LegalCorpusBuilder:
                 "tiktoken not available; using character-count fallback",
                 extra={"tokenizer": name},
             )
-        return fallback
+
+            class _CharacterTokenizer:
+                def encode(self, text: str, disallowed_special=None):
+                    return [ord(ch) for ch in text]
+
+                def decode(self, tokens: List[int]) -> str:
+                    return "".join(chr(token) for token in tokens)
+
+            return _CharacterTokenizer()
 
     def _structure_plan_from_router(self, router_plan: IngestionPlan) -> StructurePlan | None:
         segmentation = router_plan.segmentation or SegmentationConfig()

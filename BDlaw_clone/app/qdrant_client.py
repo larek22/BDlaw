@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import gzip
 import logging
 import random
 import time
@@ -45,36 +43,18 @@ class QdrantVectorStore:
         if not url:
             raise ValueError("Qdrant URL must be configured")
 
-        timeout = None
-        if hasattr(httpx, "Timeout"):
-            timeout = httpx.Timeout(
-                timeout=settings.qdrant.read_timeout_seconds,
-                connect=settings.qdrant.connect_timeout_seconds,
-                read=settings.qdrant.read_timeout_seconds,
-                write=settings.qdrant.write_timeout_seconds,
-            )
-        limits = None
-        if hasattr(httpx, "Limits"):
-            limits = httpx.Limits(
-                max_connections=max(10, settings.qdrant.max_batch_size * 2 // 3),
-                max_keepalive_connections=max(5, max(1, settings.qdrant.max_batch_size // 2)),
-            )
+        timeout = httpx.Timeout(
+            timeout=settings.qdrant.read_timeout_seconds,
+            connect=settings.qdrant.connect_timeout_seconds,
+            read=settings.qdrant.read_timeout_seconds,
+            write=settings.qdrant.write_timeout_seconds,
+        )
 
         client_kwargs: dict[str, object] = {
             "url": url,
+            "timeout": timeout,
             "prefer_grpc": settings.qdrant.prefer_grpc,
         }
-        if timeout is not None:
-            client_kwargs["timeout"] = timeout
-        if hasattr(httpx, "Client"):
-            try:
-                client_kwargs["http_client"] = httpx.Client(
-                    http2=True,
-                    timeout=timeout,
-                    limits=limits,
-                )
-            except Exception as exc:  # pragma: no cover - defensive guard
-                logger.warning("Falling back to default Qdrant HTTP client: %s", exc)
         if settings.qdrant.prefer_grpc:
             client_kwargs["grpc_port"] = settings.qdrant.grpc_port
 
@@ -121,18 +101,8 @@ class QdrantVectorStore:
         self._retry_max_delay = max(
             self._retry_initial_delay, settings.qdrant.retry_max_delay
         )
-        self._wait_for_upsert = settings.qdrant.use_wait or settings.qdrant.upsert_wait
+        self._wait_for_upsert = settings.qdrant.upsert_wait
         self._ordering = settings.qdrant.upsert_ordering or "weak"
-        self._max_batch_size = max(1, settings.qdrant.max_batch_size)
-        self._min_batch_size = max(1, min(self._max_batch_size, settings.qdrant.min_batch_size))
-        payload_settings = getattr(settings, "payload", None)
-        if payload_settings is not None:
-            try:
-                self._slim_body_text = bool(payload_settings.slim_body_text)
-            except Exception:
-                self._slim_body_text = False
-        else:
-            self._slim_body_text = False
 
     @property
     def collection_name(self) -> str:
@@ -197,25 +167,6 @@ class QdrantVectorStore:
             self._delete_collection(previous)
         target = alias if swapped else new_collection
         self._ensure_payload_indexes(target)
-
-    def ensure_shadow_collection(self, alias: str, dim: int, on_disk: bool = True) -> str:
-        """Provision a new collection without mutating *alias*."""
-
-        logger.info(
-            "Provisioning shadow collection for alias %s dim=%d on_disk=%s",
-            alias,
-            dim,
-            on_disk,
-        )
-        try:
-            target = self._provision_collection(alias, dim, on_disk=on_disk)
-        except TypeError:
-            # DEPRECATED: older versions without on_disk support
-            logger.debug("create_collection lacks on_disk flags; provisioning without them")
-            target = self._provision_collection(alias, dim)
-        self._ensure_payload_indexes(target)
-        logger.info("Shadow collection ready: %s", target)
-        return target
 
     def reset_collection(self, embedding_model: str) -> None:
         if not self._allow_destructive:
@@ -447,74 +398,6 @@ class QdrantVectorStore:
             return None
         return rest.Filter(must=conditions)
 
-    def build_law_filter(
-        self,
-        *,
-        as_of_date: Optional[str] = None,
-        in_force_only: bool = True,
-        hierarchy: Optional[Mapping[str, int | str]] = None,
-    ) -> Optional[rest.Filter]:
-        conditions: List[rest.FieldCondition] = []
-        if in_force_only:
-            conditions.append(
-                rest.FieldCondition(
-                    key="law_meta.status",
-                    match=rest.MatchValue(value="in_force"),
-                )
-            )
-        date_int = _date_string_to_int(as_of_date)
-        range_type = getattr(rest, "Range", None)
-        if date_int is not None and range_type is not None:
-            conditions.append(
-                rest.FieldCondition(
-                    key="law_meta.date_from_int",
-                    range=range_type(lte=date_int),
-                )
-            )
-            conditions.append(
-                rest.FieldCondition(
-                    key="law_meta.date_to_int",
-                    range=range_type(gte=date_int),
-                )
-            )
-        elif date_int is not None:
-            conditions.append(
-                rest.FieldCondition(
-                    key="law_meta.date_from_int",
-                    match=rest.MatchValue(value=date_int),
-                )
-            )
-            conditions.append(
-                rest.FieldCondition(
-                    key="law_meta.date_to_int",
-                    match=rest.MatchValue(value=date_int),
-                )
-            )
-        if hierarchy:
-            part_no = hierarchy.get("part_no") if isinstance(hierarchy, Mapping) else None
-            chapter_no = hierarchy.get("chapter_no") if isinstance(hierarchy, Mapping) else None
-            article_no_int = hierarchy.get("article_no_int") if isinstance(hierarchy, Mapping) else None
-            for key, value in (
-                ("hierarchy.part_no", part_no),
-                ("hierarchy.chapter_no", chapter_no),
-                ("hierarchy.article_no_int", article_no_int),
-            ):
-                if value in (None, "", "*"):
-                    continue
-                try:
-                    parsed = int(value)
-                except Exception:
-                    continue
-                conditions.append(
-                    rest.FieldCondition(
-                        key=key,
-                        match=rest.MatchValue(value=parsed),
-                    )
-                )
-        if not conditions:
-            return None
-        return rest.Filter(must=conditions)
-
     def combine_filters(self, *filters: Optional[rest.Filter]) -> Optional[rest.Filter]:
         active = [flt for flt in filters if flt is not None]
         if not active:
@@ -596,12 +479,9 @@ class QdrantVectorStore:
         chunks: Sequence[ChunkRecord],
         title_vectors: Dict[str, List[float]],
         body_vectors: Dict[str, List[float]],
-        *,
-        collection_override: str | None = None,
     ) -> None:
         if not chunks:
             return
-        collection_name = collection_override or self.collection_name
         expected_dim = len(next(iter(body_vectors.values()))) if body_vectors else 0
         points: List[rest.PointStruct] = []
         estimated_bytes = 0
@@ -646,12 +526,6 @@ class QdrantVectorStore:
                 "title_sha256": chunk.title_sha256,
                 "body_sha256": chunk.body_sha256,
             }
-            if self._slim_body_text and body_text:
-                try:
-                    compressed = gzip.compress(body_text.encode("utf-8"))
-                    payload["body_text_gzip_b64"] = base64.b64encode(compressed).decode("ascii")
-                except Exception:  # pragma: no cover - compression failure best effort
-                    logger.debug("Failed to compress body text for %s", chunk.doc_id)
             point = rest.PointStruct(
                 id=point_id,
                 vector={
@@ -662,111 +536,48 @@ class QdrantVectorStore:
             )
             point_bytes = self._estimate_point_bytes(title_vector, body_vector, payload)
             if points and estimated_bytes + point_bytes > target_bytes:
-                self._upsert_batch(points, expected_dim, estimated_bytes, collection_name)
+                self._upsert_batch(points, expected_dim, estimated_bytes)
                 points = []
                 estimated_bytes = 0
             points.append(point)
             estimated_bytes += point_bytes
         if points:
-            self._upsert_batch(points, expected_dim, estimated_bytes, collection_name)
+            self._upsert_batch(points, expected_dim, estimated_bytes)
 
     def _upsert_batch(
-        self,
-        points: List[rest.PointStruct],
-        vector_dim: int,
-        estimated_bytes: float,
-        collection_name: str,
+        self, points: List[rest.PointStruct], vector_dim: int, estimated_bytes: float
     ) -> None:
         logger.info(
             "[UPSERT] collection=%s points=%d dim=%d bytes~=%.0f",
-            collection_name,
+            self.collection_name,
             len(points),
             vector_dim,
             estimated_bytes,
         )
-        self._upsert_points_dynamic(
-            collection_name=collection_name,
-            points=points,
-            estimated_bytes=estimated_bytes,
-        )
+        try:
+            self._commit_upsert(points, estimated_bytes)
+        except Exception as exc:
+            if len(points) > 1 and _is_timeout_error(exc):
+                split = max(1, len(points) // 2)
+                logger.warning(
+                    "Upsert timed out for %d points; retrying as batches of %d and %d",
+                    len(points),
+                    split,
+                    len(points) - split,
+                )
+                left = points[:split]
+                right = points[split:]
+                self._upsert_batch(
+                    left, vector_dim, self._estimate_points_bytes(left, vector_dim)
+                )
+                self._upsert_batch(
+                    right, vector_dim, self._estimate_points_bytes(right, vector_dim)
+                )
+                return
+            logger.exception("Failed to upsert batch with %d points", len(points))
+            raise
 
-    def _upsert_points_dynamic(
-        self,
-        *,
-        collection_name: str,
-        points: Sequence[rest.PointStruct],
-        estimated_bytes: float,
-    ) -> None:
-        if not points:
-            return
-        batch_size = min(self._max_batch_size, max(self._min_batch_size, len(points)))
-        index = 0
-        while index < len(points):
-            end = min(index + batch_size, len(points))
-            batch = list(points[index:end])
-            delay = self._retry_initial_delay
-            attempt = 0
-            while True:
-                attempt += 1
-                try:
-                    self._client.upsert(
-                        collection_name=collection_name,
-                        points=batch,
-                        wait=self._wait_for_upsert,
-                        ordering=self._ordering,
-                    )
-                    logger.info(
-                        "Upsert batch=%d succeeded for %s (offset=%d)",
-                        len(batch),
-                        collection_name,
-                        index,
-                    )
-                    index = end
-                    break
-                except Exception as exc:
-                    if not _is_timeout_error(exc):
-                        logger.exception(
-                            "Upsert batch=%d failed permanently for %s", len(batch), collection_name
-                        )
-                        raise
-                    if len(batch) > self._min_batch_size:
-                        batch_size = max(self._min_batch_size, len(batch) // 2)
-                        end = min(index + batch_size, len(points))
-                        batch = list(points[index:end])
-                        sleep_for = min(
-                            self._retry_max_delay,
-                            delay + random.random(),
-                        )
-                        logger.warning(
-                            "Upsert timeout for %s; shrinking batch to %d (retry in %.2fs)",
-                            collection_name,
-                            batch_size,
-                            sleep_for,
-                        )
-                        time.sleep(sleep_for)
-                        delay = min(delay * 2, self._retry_max_delay)
-                        continue
-                    if attempt >= self._max_retry_attempts:
-                        logger.exception(
-                            "Upsert batch failed after %d attempts for %s", attempt, collection_name
-                        )
-                        raise
-                    sleep_for = min(
-                        self._retry_max_delay,
-                        delay + random.random(),
-                    )
-                    logger.warning(
-                        "Upsert batch=%d timed out for %s attempt %d/%d; retrying in %.2fs",
-                        len(batch),
-                        collection_name,
-                        attempt,
-                        self._max_retry_attempts,
-                        sleep_for,
-                    )
-                    time.sleep(sleep_for)
-                    delay = min(delay * 2, self._retry_max_delay)
-
-    def _commit_upsert(  # DEPRECATED: legacy single-shot upsert retained for compatibility
+    def _commit_upsert(
         self, points: List[rest.PointStruct], estimated_bytes: float
     ) -> None:
         attempt = 0
@@ -836,25 +647,18 @@ class QdrantVectorStore:
             return lookup, info, alias_exists
         return target, None, alias_exists
 
-    def _provision_collection(
-        self, alias: str, vector_size: int, *, on_disk: bool | None = None
-    ) -> str:
+    def _provision_collection(self, alias: str, vector_size: int) -> str:
         base = f"{alias}_d{vector_size}_{datetime.utcnow():%Y%m%d_%H%M%S}"
         candidate = base
         suffix = 0
         vectors_config = _make_vector_config(vector_size)
         while True:
             try:
-                extra_kwargs: dict[str, object] = {}
-                if on_disk is not None:
-                    extra_kwargs["on_disk_payload"] = on_disk
-                    extra_kwargs["on_disk_vectors"] = on_disk
                 self._client.create_collection(
                     collection_name=candidate,
                     vectors_config=vectors_config,
                     hnsw_config=_make_hnsw_config(),
                     optimizers_config=_make_optimizer_config(),
-                    **extra_kwargs,
                 )
             except Exception as exc:
                 message = str(exc).lower()
@@ -881,67 +685,6 @@ class QdrantVectorStore:
                 if isinstance(collection, str):
                     return collection
         return None
-
-    def swap_alias_atomically(self, alias: str, new_collection: str) -> None:
-        previous = self._resolve_alias(alias)
-        if previous == new_collection:
-            logger.info("Alias %s already points to %s", alias, new_collection)
-            return
-        operations: List[dict[str, dict[str, str]]] = [
-            {"create_alias": {"alias_name": alias, "collection_name": new_collection}}
-        ]
-        if previous and previous != new_collection:
-            operations.append(
-                {
-                    "delete_alias": {
-                        "alias_name": alias,
-                        "collection_name": previous,
-                    }
-                }
-            )
-        try:
-            if hasattr(self._client, "update_aliases"):
-                self._client.update_aliases(change_aliases_operations=operations)
-            else:
-                self._client.update_collection_aliases(
-                    change_aliases_operations=operations
-                )
-        except Exception as exc:
-            logger.error(
-                "Atomic alias swap failed for %s -> %s: %s",
-                alias,
-                new_collection,
-                exc,
-            )
-            raise
-        logger.info("Alias swap OK → %s → %s", alias, new_collection)
-        self._write_collection_name = alias
-
-    def cleanup_old_collections(self, alias: str, keep_n: int = 2) -> None:
-        keep_n = max(1, keep_n)
-        try:
-            response = self._client.get_collections()
-        except Exception as exc:
-            logger.warning("Unable to list collections for cleanup: %s", exc)
-            return
-        collections = getattr(response, "collections", None) or []
-        names: List[str] = []
-        for description in collections:
-            name = getattr(description, "name", None) or getattr(
-                description, "collection_name", None
-            )
-            if isinstance(name, str) and name.startswith(alias):
-                names.append(name)
-        if len(names) <= keep_n:
-            logger.info("No cleanup required for alias %s (found=%d)", alias, len(names))
-            return
-        names.sort(reverse=True)
-        stale = names[keep_n:]
-        for collection_name in stale:
-            logger.info(
-                "Preserving historical collection %s (cleanup deferred)", collection_name
-            )
-        # TODO: add safe deletion once retention policy confirmed
 
     def _swap_alias(
         self, alias: str, new_collection: str, previous: Optional[str]
@@ -989,60 +732,15 @@ class QdrantVectorStore:
             logger.warning("Failed to delete legacy collection %s: %s", collection, exc)
 
 
-    def count_points(self, collection: Optional[str] = None) -> int:
-        target = collection or self.collection_name
+    def count_points(self) -> int:
         try:
             response = self._client.count(
-                collection_name=target, exact=True
+                collection_name=self.collection_name, exact=True
             )
         except Exception:
-            logger.exception("Failed to count points for collection %s", target)
+            logger.exception("Failed to count points for collection %s", self.collection_name)
             raise
         return int(getattr(response, "count", 0))
-
-    def health_probe(
-        self,
-        collection: str,
-        sample_texts: Sequence[str],
-        limit: int = 5,
-    ) -> bool:
-        sample_terms = [text.strip() for text in sample_texts if text and text.strip()]
-        limit = max(limit, len(sample_terms), 1)
-        try:
-            points, _ = self._client.scroll(
-                collection_name=collection,
-                limit=limit,
-                with_payload=True,
-            )
-        except Exception as exc:
-            logger.error("Health probe failed for %s: %s", collection, exc)
-            return False
-        if not points:
-            logger.warning("Health probe found no points in %s", collection)
-            return False
-        payloads = [getattr(point, "payload", {}) or {} for point in points]
-        if not sample_terms:
-            logger.info(
-                "Health probe defaults to payload presence check for %s (points=%d)",
-                collection,
-                len(payloads),
-            )
-            return True
-        lowered_payloads = []
-        for payload in payloads:
-            title = str(payload.get("title_text", ""))
-            body = str(payload.get("body_text", ""))
-            lowered_payloads.append((title.lower(), body.lower()))
-        for term in sample_terms:
-            term_lower = term.lower()
-            if any(term_lower in title or term_lower in body for title, body in lowered_payloads):
-                continue
-            logger.warning(
-                "Health probe term '%s' missing in sample from %s", term, collection
-            )
-            return False
-        logger.info("Health probe succeeded for %s", collection)
-        return True
 
     def count_points_with_prefix(self, prefix: str) -> int:
         if not prefix:
@@ -1325,12 +1023,7 @@ class QdrantVectorStore:
 def _is_timeout_error(exc: Exception | None) -> bool:
     if exc is None:
         return False
-    timeout_types: tuple[type[BaseException], ...] = ()
-    for attr in ("TimeoutException", "ReadTimeout", "WriteTimeout"):
-        candidate = getattr(httpx, attr, None)
-        if candidate is not None:
-            if isinstance(candidate, type):
-                timeout_types = timeout_types + (candidate,)
+    timeout_types = (httpx.TimeoutException,)
     if _ResponseHandlingException:
         timeout_types = timeout_types + tuple(
             _ResponseHandlingException

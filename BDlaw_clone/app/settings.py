@@ -65,17 +65,14 @@ class QdrantSettings(BaseModel):
     timeout_seconds: float = Field(default_factory=lambda: _env_float("QDRANT_TIMEOUT_SECONDS", 30.0))
     prefer_grpc: bool = Field(default_factory=lambda: _env_bool("QDRANT_PREFER_GRPC", True))
     grpc_port: int = Field(default_factory=lambda: _env_int("QDRANT_GRPC_PORT", 6334))
-    connect_timeout_seconds: float = Field(default_factory=lambda: _env_float("QDRANT_CONNECT_TIMEOUT", 10.0))
-    read_timeout_seconds: float = Field(default_factory=lambda: _env_float("QDRANT_READ_TIMEOUT", 60.0))
-    write_timeout_seconds: float = Field(default_factory=lambda: _env_float("QDRANT_WRITE_TIMEOUT", 240.0))
+    connect_timeout_seconds: float = Field(default_factory=lambda: _env_float("QDRANT_CONNECT_TIMEOUT", 30.0))
+    read_timeout_seconds: float = Field(default_factory=lambda: _env_float("QDRANT_READ_TIMEOUT", 120.0))
+    write_timeout_seconds: float = Field(default_factory=lambda: _env_float("QDRANT_WRITE_TIMEOUT", 120.0))
     target_batch_bytes: int = Field(default_factory=lambda: _env_int("INGEST_TARGET_BATCH_BYTES", 2_000_000))
     max_retries: int = Field(default_factory=lambda: max(1, _env_int("QDRANT_MAX_RETRIES", 5)))
     retry_initial_delay: float = Field(default_factory=lambda: _env_float("QDRANT_RETRY_INITIAL_DELAY", 1.0))
     retry_max_delay: float = Field(default_factory=lambda: _env_float("QDRANT_RETRY_MAX_DELAY", 15.0))
     upsert_wait: bool = Field(default_factory=lambda: _env_bool("QDRANT_UPSERT_WAIT", False))
-    use_wait: bool = Field(default_factory=lambda: _env_bool("QDRANT_USE_WAIT", False))
-    max_batch_size: int = Field(default_factory=lambda: max(1, _env_int("QDRANT_MAX_BATCH_SIZE", 128)))
-    min_batch_size: int = Field(default_factory=lambda: max(1, _env_int("QDRANT_MIN_BATCH_SIZE", 16)))
     upsert_ordering: str = Field(default_factory=lambda: (_env_str("QDRANT_UPSERT_ORDERING", "weak") or "weak"))
     title_max_chars: int = Field(default_factory=lambda: _env_int("TEXT_TITLE_MAX", 256))
     preview_max_chars: int = Field(default_factory=lambda: _env_int("TEXT_PREVIEW_MAX", 1200))
@@ -86,12 +83,6 @@ class QdrantSettings(BaseModel):
 class IngestSettings(BaseModel):
     chunk_size_chars: int = Field(default_factory=lambda: _env_int("CHUNK_SIZE", 1200))
     chunk_overlap_chars: int = Field(default_factory=lambda: _env_int("CHUNK_OVERLAP", 120))
-    chunk_size_tokens: int = Field(default_factory=lambda: _env_int("CHUNK_SIZE_TOKENS", 1200))
-    overlap_tokens: int = Field(default_factory=lambda: _env_int("CHUNK_OVERLAP_TOKENS", 120))
-    validation_sample_k: int = Field(default_factory=lambda: max(1, _env_int("INGEST_VALIDATION_SAMPLE_K", 8)))
-    atomic_alias_swap: bool = Field(default_factory=lambda: _env_bool("INGEST_ATOMIC_ALIAS_SWAP", True))
-    enable_new_loaders: bool = Field(default_factory=lambda: _env_bool("INGEST_ENABLE_NEW_LOADERS", False))
-    dry_run: bool = Field(default_factory=lambda: _env_bool("INGEST_DRY_RUN", False))
 
     model_config = {"extra": "ignore", "validate_assignment": True}
 
@@ -106,7 +97,6 @@ class QuerySettings(BaseModel):
     as_of_date: str | None = Field(default_factory=lambda: _env_str("QUERY_AS_OF_DATE"))
     as_of_start_date: str | None = Field(default_factory=lambda: _env_str("QUERY_AS_OF_START"))
     status_filter: str = Field(default_factory=lambda: _env_str("QUERY_STATUS", "active") or "active")
-    enable_law_filters: bool = Field(default_factory=lambda: _env_bool("QUERY_ENABLE_LAW_FILTERS", True))
     reranker_mode: str = Field(default_factory=lambda: _env_str("RERANKER_MODE", "off") or "off")
     reranker_weight: float = Field(default_factory=lambda: _env_float("RERANKER_WEIGHT", 0.7))
     reranker_model: str = Field(default_factory=lambda: _env_str("RERANKER_MODEL", "BAAI/bge-reranker-large") or "BAAI/bge-reranker-large")
@@ -123,8 +113,6 @@ class PlannerSettings(BaseModel):
     max_tokens: int = Field(default_factory=lambda: _env_int("PLANNER_MAX_TOKENS", 700))
     prompt_version: str = Field(default_factory=lambda: _env_str("PLANNER_PROMPT_VERSION", "v1.0") or "v1.0")
     sample_bytes: int = Field(default_factory=lambda: _env_int("PLANNER_SAMPLE_BYTES", 20000))
-    gpt41_budget_tokens_per_file: int = Field(default_factory=lambda: _env_int("PLANNER_GPT41_BUDGET", 60000))
-    enable_cache: bool = Field(default_factory=lambda: _env_bool("PLANNER_ENABLE_CACHE", True))
 
     model_config = {"extra": "ignore", "validate_assignment": True}
 
@@ -146,12 +134,6 @@ class OcrSettings(BaseModel):
     timeout_seconds: int = Field(default_factory=lambda: _env_int("OCR_TIMEOUT_SECONDS", 180))
     languages: str = Field(default_factory=lambda: _env_str("OCR_LANGUAGES", "rus+eng") or "rus+eng")
     max_retries: int = Field(default_factory=lambda: max(1, _env_int("OCR_MAX_RETRIES", 2)))
-
-    model_config = {"extra": "ignore", "validate_assignment": True}
-
-
-class PayloadSettings(BaseModel):
-    slim_body_text: bool = Field(default_factory=lambda: _env_bool("PAYLOAD_SLIM_BODY_TEXT", False))
 
     model_config = {"extra": "ignore", "validate_assignment": True}
 
@@ -182,7 +164,6 @@ class AppSettings(BaseModel):
     ocr: OcrSettings = Field(default_factory=OcrSettings)
     router: RouterSettings = Field(default_factory=RouterSettings)
     verification: VerificationSettings = Field(default_factory=VerificationSettings)
-    payload: PayloadSettings = Field(default_factory=PayloadSettings)
     allow_destructive_migrations: bool = Field(default_factory=lambda: _env_bool("ALLOW_DESTRUCTIVE", False))
 
     model_config = {"extra": "ignore", "validate_assignment": True}
