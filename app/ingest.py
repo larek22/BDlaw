@@ -655,18 +655,92 @@ class IngestService:
             level=logging.INFO,
         )
 
-        seen_ids: set[str] = set()
+        # DEPRECATED: hard failure on duplicate chunk identifiers previously aborted
+        # ingestion runs. The pipeline now deduplicates conflicting chunks while
+        # preserving deterministic identifiers for idempotent upserts.
+        # seen_ids: set[str] = set()
+        # for chunk in changed_chunks:
+        #     deterministic_id = expected_chunk_id(chunk)
+        #     if chunk.chunk_id != deterministic_id:
+        #         chunk.chunk_id = deterministic_id
+        #     if chunk.chunk_id in seen_ids:
+        #         message = (
+        #             f"Duplicate chunk id detected before upsert: {chunk.chunk_id}"
+        #         )
+        #         logger.error(message)
+        #         raise ValueError(message)
+        #     seen_ids.add(chunk.chunk_id)
+
+        deduped_chunks: list[ChunkRecord] = []
+        chunk_index_by_id: dict[str, int] = {}
+        identical_duplicates = 0
+        replaced_duplicates = 0
         for chunk in changed_chunks:
             deterministic_id = expected_chunk_id(chunk)
             if chunk.chunk_id != deterministic_id:
                 chunk.chunk_id = deterministic_id
-            if chunk.chunk_id in seen_ids:
-                message = (
-                    f"Duplicate chunk id detected before upsert: {chunk.chunk_id}"
+            existing_idx = chunk_index_by_id.get(chunk.chunk_id)
+            if existing_idx is None:
+                chunk_index_by_id[chunk.chunk_id] = len(deduped_chunks)
+                deduped_chunks.append(chunk)
+                continue
+
+            existing = deduped_chunks[existing_idx]
+            if (
+                existing.body_sha256 == chunk.body_sha256
+                and existing.title_sha256 == chunk.title_sha256
+                and existing.body_text == chunk.body_text
+                and existing.title_text == chunk.title_text
+            ):
+                identical_duplicates += 1
+                logger.warning(
+                    "Duplicate chunk id %s matches existing payload; skipping duplicate doc=%s index=%s",
+                    chunk.chunk_id,
+                    chunk.doc_id,
+                    chunk.chunk_index,
                 )
-                logger.error(message)
-                raise ValueError(message)
-            seen_ids.add(chunk.chunk_id)
+                continue
+
+            replaced_duplicates += 1
+            deduped_chunks[existing_idx] = chunk
+            logger.warning(
+                "Duplicate chunk id %s with differing payload detected; replacing doc=%s index=%s with doc=%s index=%s",
+                chunk.chunk_id,
+                existing.doc_id,
+                existing.chunk_index,
+                chunk.doc_id,
+                chunk.chunk_index,
+            )
+
+        if identical_duplicates or replaced_duplicates:
+            report(
+                "Resolved duplicate chunk ids: identical={identical} replaced={replaced}".format(
+                    identical=identical_duplicates,
+                    replaced=replaced_duplicates,
+                ),
+                level=logging.WARNING,
+            )
+
+        changed_chunks = deduped_chunks
+        if doc_expected_counts:
+            deduped_expected: Dict[str, int] = {}
+            for chunk in changed_chunks:
+                deduped_expected[chunk.doc_id] = deduped_expected.get(chunk.doc_id, 0) + 1
+            doc_expected_counts = deduped_expected
+
+        if not changed_chunks:
+            report(
+                "All candidate chunks were duplicates; skipping Qdrant upsert",
+                level=logging.WARNING,
+            )
+            self._cleanup_pending_manifests(processed_documents)
+            return IngestStats(
+                files_processed=len(processed_documents),
+                chunks_created=0,
+                skipped=skipped,
+                alias_swapped=False,
+                validation_passed=False,
+            )
 
         sample_chunk = changed_chunks[0]
         preview = sample_chunk.body_text.replace("\n", " ").strip()

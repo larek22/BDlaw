@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, Iterable, List
+
+from tests_helpers_ingest import (
+    FakeVectorStore,
+    build_service,
+    make_chunk,
+    make_processed,
+)
 
 from app.data_repository import DataRepository
 from app.ingest import IngestService, make_point_id
@@ -148,6 +155,9 @@ def test_ingest_writes_chunks_and_logs_progress(tmp_path: Path) -> None:
         repository=repository,
         verify_after_ingest=False,
     )
+    service.builder.tokenizer = SimpleNamespace(
+        encode=lambda text, disallowed_special=(): list(text)
+    )
 
     raw_file = repository.paths.raw / "gk_rf" / "part_1" / "law.rtf"
     raw_file.parent.mkdir(parents=True, exist_ok=True)
@@ -191,6 +201,9 @@ def test_force_reingest_when_collection_empty(tmp_path: Path) -> None:
         reader_factory=DummyReaderFactory(),
         repository=repository,
         verify_after_ingest=False,
+    )
+    service.builder.tokenizer = SimpleNamespace(
+        encode=lambda text, disallowed_special=(): list(text)
     )
 
     def fake_process(document, normalized_text: str, chunk_size: int, overlap: int):
@@ -323,3 +336,42 @@ def test_atomic_flow_waits_for_async_counts(tmp_path: Path) -> None:
     assert vector_store.wait_calls[0][1] == 1
     assert stats.alias_swapped is False
     assert stats.validation_passed is True
+
+
+def test_atomic_flow_deduplicates_duplicate_chunk_ids(tmp_path: Path) -> None:
+    settings = AppSettings()
+    settings.ingest.atomic_alias_swap = True
+    settings.ingest.dry_run = True
+
+    vector_store = FakeVectorStore(expected_dim=4)
+    service = build_service(settings, vector_store)
+
+    primary = make_chunk("doc-1", 0)
+    duplicate_identical = replace(primary)
+    conflicting = replace(primary)
+    conflicting.body_text = "Обновленный текст"
+    conflicting.body_sha256 = "body-updated"
+    conflicting.chunk_sha256 = "chunk-updated"
+
+    title_vectors = {
+        primary.title_sha256: [0.1, 0.2, 0.3, 0.4],
+    }
+    body_vectors = {
+        primary.body_sha256: [0.4, 0.3, 0.2, 0.1],
+        conflicting.body_sha256: [0.9, 0.8, 0.7, 0.6],
+    }
+
+    stats = service._ingest_atomic_flow(
+        report=lambda *_args, **_kwargs: None,
+        processed_documents=[make_processed()],
+        changed_chunks=[primary, duplicate_identical, conflicting],
+        title_vectors=title_vectors,
+        body_vectors=body_vectors,
+        embedding_model=settings.openai_models.embedding,
+        skipped=0,
+        doc_expected_counts={primary.doc_id: 3},
+    )
+
+    assert stats.chunks_created == 1
+    assert vector_store.upsert_calls[-1][1] == 1
+    assert vector_store.last_upsert_chunks[0].body_text == conflicting.body_text

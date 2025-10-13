@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 import uuid
 
 from app.data_repository import DataRepository
@@ -19,6 +20,9 @@ def test_normalize_text_removes_extra_whitespace() -> None:
 def test_legal_corpus_builder_creates_articles(tmp_path: Path) -> None:
     repository = DataRepository(tmp_path / "data")
     builder = LegalCorpusBuilder(repository)
+    builder.tokenizer = SimpleNamespace(
+        encode=lambda text, disallowed_special=(): list(text)
+    )
 
     text = """
     РАЗДЕЛ I. ТЕСТОВЫЙ РАЗДЕЛ
@@ -54,6 +58,9 @@ def test_legal_corpus_builder_creates_articles(tmp_path: Path) -> None:
 def test_builder_detects_case_insensitive_headings(tmp_path: Path) -> None:
     repository = DataRepository(tmp_path / "data")
     builder = LegalCorpusBuilder(repository)
+    builder.tokenizer = SimpleNamespace(
+        encode=lambda text, disallowed_special=(): list(text)
+    )
 
     text = """
     раздел iv. тестовый раздел

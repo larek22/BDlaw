@@ -39,6 +39,7 @@ class FakeVectorStore:
         self.cleaned = False
         self.upsert_calls: list[tuple[str, int]] = []
         self.points: dict[str, dict[str, set[str]]] = {}
+        self.last_upsert_chunks: list[ChunkRecord] = []
 
     def ensure_collection(self, embedding_model: str, recreate: bool = False) -> None:
         return None
@@ -52,9 +53,11 @@ class FakeVectorStore:
 
     def upsert_chunks(self, chunks, title_vectors, body_vectors, *, collection_name: str | None = None) -> None:
         target = collection_name or self.collection_name
-        self.upsert_calls.append((target, len(chunks)))
+        chunk_list = list(chunks)
+        self.upsert_calls.append((target, len(chunk_list)))
+        self.last_upsert_chunks = chunk_list
         bucket = self.points.setdefault(target, {})
-        for chunk in chunks:
+        for chunk in chunk_list:
             bucket.setdefault(chunk.doc_id, set()).add(chunk.chunk_id)
 
     def count_points(self, collection: str | None = None) -> int:
