@@ -841,14 +841,21 @@ class IngestService:
                     level=logging.INFO,
                 )
             else:
-                self.vector_store.swap_alias_atomically(alias, target_collection)
-                report(
-                    f"Alias swap OK → {alias} → {target_collection}",
-                    level=logging.INFO,
+                alias_swapped = self.vector_store.swap_alias_atomically(
+                    alias, target_collection
                 )
-                alias_swapped = True
-                self._commit_pending_manifests(processed_documents)
-                self.vector_store.cleanup_old_collections(alias, keep_n=2)
+                if alias_swapped:
+                    report(
+                        f"Alias swap OK -> {alias} -> {target_collection}",
+                        level=logging.INFO,
+                    )
+                    self._commit_pending_manifests(processed_documents)
+                    self.vector_store.cleanup_old_collections(alias, keep_n=2)
+                else:
+                    report(
+                        "Alias swap did not complete; pending manifests retained for investigation",
+                        level=logging.WARNING,
+                    )
         else:
             failure_reason = (
                 "count mismatch" if not is_count_valid else "health probe failure"

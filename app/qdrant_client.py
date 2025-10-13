@@ -1013,16 +1013,43 @@ class QdrantVectorStore:
         except Exception as exc:
             logger.warning("Failed to delete legacy collection %s: %s", collection, exc)
 
-    def swap_alias_atomically(self, alias: str, new_collection: str) -> None:
+    def _wait_for_alias(self, alias: str, expected: str) -> bool:
+        """Poll the alias target until it matches ``expected`` or times out."""
+
+        if not expected:
+            return False
+
+        deadline = time.perf_counter() + max(0.0, self._validation_max_wait_seconds or 0.0)
+        interval = max(0.1, self._validation_poll_interval_seconds)
+
+        while True:
+            resolved = self._resolve_alias(alias)
+            if resolved == expected:
+                return True
+            if time.perf_counter() >= deadline:
+                return False
+            time.sleep(interval)
+
+    def swap_alias_atomically(self, alias: str, new_collection: str) -> bool:
         previous = self._resolve_alias(alias)
         swapped = self._swap_alias(alias, new_collection, previous)
-        if swapped:
+        if swapped and self._wait_for_alias(alias, new_collection):
             logger.info("Alias swap OK -> %s -> %s", alias, new_collection)
+            return True
+
+        if swapped:
+            logger.warning(
+                "Alias swap for %s reported success but target collection was not confirmed; "
+                "falling back to direct collection writes",
+                alias,
+            )
+            self._write_collection_name = new_collection
         else:
             logger.warning(
                 "Alias swap for %s fell back to direct writes; manual verification recommended",
                 alias,
             )
+        return False
 
     def cleanup_old_collections(self, alias: str, keep_n: int = 2) -> None:
         current = self._resolve_alias(alias)

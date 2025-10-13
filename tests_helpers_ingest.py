@@ -74,9 +74,10 @@ class FakeVectorStore:
     def health_probe(self, collection: str, sample_texts: list[str], limit: int = 5) -> bool:
         return self.health_ok
 
-    def swap_alias_atomically(self, alias: str, new_collection: str) -> None:
+    def swap_alias_atomically(self, alias: str, new_collection: str) -> bool:
         self.swapped = True
         self.last_swap = (alias, new_collection)
+        return True
 
     def cleanup_old_collections(self, alias: str, keep_n: int = 2) -> None:
         self.cleaned = True
