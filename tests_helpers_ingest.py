@@ -91,6 +91,8 @@ def make_processed() -> ProcessedDocument:
         article_json_path=Path("articles.json"),
         chunk_json_path=Path("chunks.json"),
         normalized_text_path=Path("normalized.txt"),
+        manifest_path=Path("manifest.json"),
+        pending_manifest_path=Path("manifest.json.pending"),
         articles=[],
         chunks=[],
         doc_ids_changed=[],
@@ -100,11 +102,20 @@ def make_processed() -> ProcessedDocument:
 
 def build_service(settings: AppSettings, vector_store: FakeVectorStore) -> IngestService:
     embedding_client = FakeEmbeddingClient(settings)
+    
+    class _StubFactory:
+        def __init__(self) -> None:
+            self.settings = settings
+
+        def read(self, path: Path):  # pragma: no cover - not exercised in unit tests
+            raise NotImplementedError(path)
+
     service = IngestService(
         settings=settings,
         embedding_client=embedding_client,
         vector_store=vector_store,
         repository=None,
+        reader_factory=_StubFactory(),
         verify_after_ingest=False,
     )
     return service

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 import time
 from dataclasses import dataclass
@@ -67,6 +68,30 @@ class IngestService:
         self._loader_map: Dict[str, Callable[[Path], "DocumentText"]] = {}
         if self.settings.ingest.enable_new_loaders:
             self._loader_map = self._build_loader_map()
+
+    def _commit_pending_manifests(
+        self, processed_documents: Sequence[ProcessedDocument]
+    ) -> None:
+        """Atomically promote pending manifests written during processing."""
+
+        seen: set[Path] = set()
+        for processed in processed_documents:
+            pending = getattr(processed, "pending_manifest_path", None)
+            final = getattr(processed, "manifest_path", None)
+            if not pending or not final:
+                continue
+            if pending in seen:
+                continue
+            seen.add(pending)
+            if not pending.exists():
+                continue
+            final.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.replace(pending, final)
+            except FileNotFoundError:
+                logger.debug("Pending manifest %s disappeared before commit", pending)
+            else:
+                logger.info("Committed manifest %s", final)
 
     def ingest(
         self,
@@ -161,6 +186,7 @@ class IngestService:
         )
 
         if not changed_chunks:
+            self._commit_pending_manifests(processed_documents)
             return IngestStats(files_processed=0, chunks_created=0, skipped=skipped)
 
         embedding_model = self.settings.openai_models.embedding
@@ -460,6 +486,8 @@ class IngestService:
                 level=logging.INFO,
             )
 
+        self._commit_pending_manifests(processed_documents)
+
         stats = IngestStats(
             files_processed=len(processed_documents),
             chunks_created=len(changed_chunks),
@@ -590,12 +618,17 @@ class IngestService:
                     "Dry-run enabled; skipping alias swap despite successful validation",
                     level=logging.INFO,
                 )
+                report(
+                    "Dry-run mode retains pending manifests for manual review",
+                    level=logging.INFO,
+                )
             else:
                 self.vector_store.swap_alias_atomically(alias, target_collection)
                 report(
                     f"Alias swap OK → {alias} → {target_collection}",
                     level=logging.INFO,
                 )
+                self._commit_pending_manifests(processed_documents)
                 self.vector_store.cleanup_old_collections(alias, keep_n=2)
         else:
             failure_reason = (
