@@ -1,25 +1,6 @@
 import sys
-from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict
-
-ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-for entry in list(sys.path):
-    if "BDlaw_clone" in entry:
-        sys.path.remove(entry)
-
-collect_ignore_glob = ["BDlaw_clone/tests/*"]
-
-import importlib
-
-for key in list(sys.modules):
-    if key == "app" or key.startswith("app."):
-        sys.modules.pop(key)
-
-importlib.import_module("app")
 
 
 def _install_stub_openai() -> None:

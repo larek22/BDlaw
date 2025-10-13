@@ -233,32 +233,6 @@ class QueryPipeline:
         if temporal_filter:
             filters.append(temporal_filter)
 
-        if self.settings.query.enable_law_filters:
-            law_conditions: List[rest.FieldCondition] = []
-            if self.settings.query.filter_part_no is not None:
-                law_conditions.append(
-                    rest.FieldCondition(
-                        key="hierarchy.part_no",
-                        match=rest.MatchValue(value=self.settings.query.filter_part_no),
-                    )
-                )
-            if self.settings.query.filter_chapter_no is not None:
-                law_conditions.append(
-                    rest.FieldCondition(
-                        key="hierarchy.chapter_no",
-                        match=rest.MatchValue(value=self.settings.query.filter_chapter_no),
-                    )
-                )
-            if self.settings.query.filter_article_no_int is not None:
-                law_conditions.append(
-                    rest.FieldCondition(
-                        key="hierarchy.article_no_int",
-                        match=rest.MatchValue(value=self.settings.query.filter_article_no_int),
-                    )
-                )
-            if law_conditions:
-                filters.append(rest.Filter(must=law_conditions))
-
         return self.vector_store.combine_filters(*filters)
 
     def _tokenize_query(self, query: str) -> List[str]:
