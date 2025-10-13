@@ -994,13 +994,45 @@ class QdrantVectorStore:
             logger.info("TODO: safe removal to be implemented when retention policy finalised.")
 
 
+    def _is_collection_missing_error(self, exc: Exception) -> bool:
+        """Best-effort detection for missing collection errors across client modes."""
+
+        if isinstance(exc, _ResponseHandlingException):
+            status_code = getattr(exc, "status_code", None)
+            if status_code == 404:
+                return True
+        # gRPC errors expose a callable ``code`` that returns a StatusCode enum.
+        code_attr = getattr(exc, "code", None)
+        try:
+            code_value = code_attr() if callable(code_attr) else code_attr
+        except Exception:  # pragma: no cover - defensive, unlikely
+            code_value = None
+        if code_value is not None:
+            name = getattr(code_value, "name", "").lower()
+            if name == "not_found":
+                return True
+            if str(code_value).upper().endswith("NOT_FOUND"):
+                return True
+        # Fall back to string matching to catch REST clients and older SDKs.
+        details = getattr(exc, "details", None)
+        message = (details or str(exc) or "").lower()
+        for needle in ("not found", "doesn't exist", "does not exist"):
+            if needle in message:
+                return True
+        return False
+
     def count_points(self, collection: str | None = None) -> int:
         target = collection or self.collection_name
         try:
             response = self._client.count(
                 collection_name=target, exact=True
             )
-        except Exception:
+        except Exception as exc:
+            if self._is_collection_missing_error(exc):
+                logger.info(
+                    "Collection %s not found during count; treating as empty", target
+                )
+                return 0
             logger.exception("Failed to count points for collection %s", target)
             raise
         total = int(getattr(response, "count", 0))
