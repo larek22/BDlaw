@@ -148,6 +148,12 @@ class QdrantVectorStore:
             getattr(getattr(self._client, "_client", None), "_prefer_grpc", settings.qdrant.prefer_grpc)
         )
         self._ordering = self._resolve_write_ordering(self._ordering_preference)
+        self._validation_max_wait_seconds = max(
+            0.0, settings.ingest.validation_max_wait_seconds
+        )
+        self._validation_poll_interval_seconds = max(
+            0.1, settings.ingest.validation_poll_interval_seconds
+        )
 
     @property
     def collection_name(self) -> str:
@@ -1038,6 +1044,53 @@ class QdrantVectorStore:
         total = int(getattr(response, "count", 0))
         logger.info("Counted %d point(s) in collection %s", total, target)
         return total
+
+    def wait_for_count(self, collection: str, expected: int) -> int:
+        if expected <= 0:
+            return self.count_points(collection)
+        deadline = time.time() + self._validation_max_wait_seconds
+        poll_interval = self._validation_poll_interval_seconds
+        attempt = 0
+        latest = 0
+        while True:
+            attempt += 1
+            latest = self.count_points(collection)
+            if latest >= expected:
+                if latest > expected:
+                    logger.warning(
+                        "Validation count exceeded expected total for %s: expected=%d actual=%d",
+                        collection,
+                        expected,
+                        latest,
+                    )
+                else:
+                    logger.info(
+                        "Validation count reached expected total for %s on attempt %d",
+                        collection,
+                        attempt,
+                    )
+                return latest
+            now = time.time()
+            if now >= deadline:
+                logger.error(
+                    "Validation wait timed out for %s after %d attempt(s); last count=%d expected=%d",
+                    collection,
+                    attempt,
+                    latest,
+                    expected,
+                )
+                return latest
+            remaining = deadline - now
+            sleep_for = min(poll_interval, remaining)
+            logger.info(
+                "Validation wait for %s attempt=%d count=%d expected=%d sleeping=%.2fs",
+                collection,
+                attempt,
+                latest,
+                expected,
+                sleep_for,
+            )
+            time.sleep(max(0.1, sleep_for))
 
     def health_probe(
         self, collection: str, sample_texts: list[str], limit: int = 5

@@ -644,7 +644,17 @@ class IngestService:
             collection_name=target_collection,
         )
         expected_chunks = len(changed_chunks)
-        actual_chunks = self.vector_store.count_points(target_collection)
+        if (
+            expected_chunks
+            and not self.settings.qdrant.use_wait
+            and hasattr(self.vector_store, "wait_for_count")
+        ):
+            actual_chunks = self.vector_store.wait_for_count(
+                target_collection, expected_chunks
+            )
+        else:
+            # DEPRECATED: single immediate count after async upsert retained for compatibility.
+            actual_chunks = self.vector_store.count_points(target_collection)
         report(
             f"Validation: expected={expected_chunks} actual={actual_chunks}",
             level=logging.INFO,

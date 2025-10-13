@@ -98,6 +98,14 @@ class IngestSettings(BaseModel):
     force_reingest_if_empty: bool = Field(
         default_factory=lambda: _env_bool("INGEST_FORCE_REINGEST_IF_EMPTY", True)
     )
+    validation_max_wait_seconds: float = Field(
+        default_factory=lambda: _env_float("INGEST_VALIDATION_MAX_WAIT_SECONDS", 120.0)
+    )
+    validation_poll_interval_seconds: float = Field(
+        default_factory=lambda: _env_float(
+            "INGEST_VALIDATION_POLL_INTERVAL_SECONDS", 2.0
+        )
+    )
 
     model_config = {"extra": "ignore", "validate_assignment": True}
 
