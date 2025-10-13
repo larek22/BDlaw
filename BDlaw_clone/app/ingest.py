@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import uuid
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,15 +20,8 @@ from .qdrant_client import QdrantVectorStore
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from .embeddings import EmbeddingClient
     from .readers.factory import DocumentReaderFactory
-    from .readers.base import DocumentText
 
 logger = logging.getLogger(__name__)
-
-
-def make_point_id(doc_id: str, chunk_index: int) -> str:
-    """Deterministic point ids derived from document id and chunk index."""
-
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{doc_id}:{chunk_index}"))
 
 
 @dataclass
@@ -64,9 +56,6 @@ class IngestService:
             )
         self.reader_factory = reader_factory
         self.builder = LegalCorpusBuilder(self.repository, settings)
-        self._loader_map: Dict[str, Callable[[Path], "DocumentText"]] = {}
-        if self.settings.ingest.enable_new_loaders:
-            self._loader_map = self._build_loader_map()
 
     def ingest(
         self,
@@ -103,7 +92,7 @@ class IngestService:
 
         for path in paths:
             try:
-                document = self._load_document(path)
+                document = self.reader_factory.read(path)
             except Exception as exc:
                 message = f"Failed to read {path}: {exc}"
                 logger.error(message)
@@ -153,13 +142,6 @@ class IngestService:
                 if chunk.doc_id in changed_set:
                     changed_chunks.append(chunk)
 
-        total_articles = sum(len(processed.articles) for processed in processed_documents)
-        total_chunk_count = sum(len(processed.chunks) for processed in processed_documents)
-        report(
-            f"Parsed {total_articles} articles, {total_chunk_count} chunks",
-            level=logging.INFO,
-        )
-
         if not changed_chunks:
             return IngestStats(files_processed=0, chunks_created=0, skipped=skipped)
 
@@ -171,18 +153,11 @@ class IngestService:
         self.vector_store.ensure_collection(embedding_model=embedding_model, recreate=recreate)
 
         if changed_doc_ids:
-            if self.settings.ingest.atomic_alias_swap:
-                report(
-                    "Skipping destructive deletes prior to upsert (atomic alias swap active)",
-                    level=logging.INFO,
-                )
-                # DEPRECATED: legacy destructive delete retained for compatibility below.
-            else:
-                report(
-                    f"Deleting {len(changed_doc_ids)} document id(s) prior to upsert",
-                    level=logging.INFO,
-                )
-                self.vector_store.delete_documents(sorted(changed_doc_ids))
+            report(
+                f"Deleting {len(changed_doc_ids)} document id(s) prior to upsert",
+                level=logging.INFO,
+            )
+            self.vector_store.delete_documents(sorted(changed_doc_ids))
 
         self.embedding_client.reset_usage()
 
@@ -226,37 +201,6 @@ class IngestService:
                 f"Embedding dimension mismatch: expected {expected_dim} from {embedding_model} "
                 f"but received {vector_dim}"
             )
-
-        if self.settings.ingest.atomic_alias_swap:
-            stats = self._ingest_atomic_flow(
-                report=report,
-                processed_documents=processed_documents,
-                changed_chunks=changed_chunks,
-                title_vectors=title_vectors,
-                body_vectors=body_vectors,
-                embedding_model=embedding_model,
-                skipped=skipped,
-            )
-            usage = self.embedding_client.usage_summary()
-            elapsed = time.perf_counter() - start_time if changed_chunks else 0.0
-            report(
-                "Ingestion summary: files={files} chunks={chunks} skipped={skipped} "
-                "embed_requests={requests:.0f} cache_hits={cache:.0f} tokens={tokens:.0f} "
-                "est_cost=${cost:.4f} elapsed={elapsed:.2f}s".format(
-                    files=stats.files_processed,
-                    chunks=stats.chunks_created,
-                    skipped=stats.skipped,
-                    requests=usage["requests"],
-                    cache=usage["cache_hits"],
-                    tokens=usage["tokens"],
-                    cost=usage["cost"],
-                    elapsed=elapsed,
-                ),
-                level=logging.INFO,
-            )
-            if self.verify_after_ingest and stats.chunks_created > 0:
-                self._run_post_ingest_verification(report, progress_cb)
-            return stats
         report(
             f"[UPSERT] collection={self.vector_store.collection_name} points={len(changed_chunks)} dim={vector_dim}",
             level=logging.INFO,
@@ -483,184 +427,52 @@ class IngestService:
             level=logging.INFO,
         )
         if self.verify_after_ingest and stats.chunks_created > 0:
-            self._run_post_ingest_verification(report, progress_cb)
+            try:
+                from verify import run_verification  # local import to avoid cycles during packaging
 
-        return stats
-
-    def _build_loader_map(self) -> Dict[str, Callable[[Path], "DocumentText"]]:
-        from .loaders import docx_loader, html_loader, pdf_loader, rtf_loader, txt_loader
-
-        return {
-            ".pdf": lambda path: pdf_loader.load_pdf(
-                path,
-                settings=self.settings,
-                repository=self.repository,
-            ),
-            ".docx": docx_loader.load_docx,
-            ".rtf": rtf_loader.load_rtf,
-            ".txt": txt_loader.load_txt,
-            ".html": lambda path: html_loader.load_html(path),
-            ".htm": lambda path: html_loader.load_html(path),
-        }
-
-    def _load_document(self, path: Path):
-        loader = self._loader_map.get(path.suffix.lower()) if self._loader_map else None
-        if loader:
-            logger.info("Using loader for %s", path.name)
-            return loader(path)
-        return self.reader_factory.read(path)
-
-    def _ingest_atomic_flow(
-        self,
-        *,
-        report: Callable[[str], None],
-        processed_documents: Sequence[ProcessedDocument],
-        changed_chunks: Sequence[ChunkRecord],
-        title_vectors: Dict[str, List[float]],
-        body_vectors: Dict[str, List[float]],
-        embedding_model: str,
-        skipped: int,
-    ) -> IngestStats:
-        alias = self.vector_store.alias_name
-        expected_dim = self.vector_store.vector_size_for_model(embedding_model)
-        target_collection = self.vector_store.ensure_shadow_collection(
-            alias,
-            expected_dim,
-        )
-        report(
-            f"Atomic staging collection prepared: {target_collection}",
-            level=logging.INFO,
-        )
-
-        for chunk in changed_chunks:
-            deterministic_id = make_point_id(chunk.doc_id, chunk.chunk_index)
-            if chunk.chunk_id != deterministic_id:
-                chunk.chunk_id = deterministic_id
-
-        sample_chunk = changed_chunks[0]
-        preview = sample_chunk.body_text.replace("\n", " ").strip()
-        if len(preview) > 120:
-            preview = preview[:117] + "..."
-        report(
-            f"Sample chunk: doc={sample_chunk.doc_id} index={sample_chunk.chunk_index} sha={sample_chunk.chunk_sha256[:12]} preview='{preview}'",
-            level=logging.INFO,
-        )
-        report(
-            f"Sample point id (first chunk): {sample_chunk.chunk_id}",
-            level=logging.INFO,
-        )
-
-        self.vector_store.upsert_chunks(
-            changed_chunks,
-            title_vectors=title_vectors,
-            body_vectors=body_vectors,
-            collection_name=target_collection,
-        )
-        expected_chunks = len(changed_chunks)
-        actual_chunks = self.vector_store.count_points(target_collection)
-        report(
-            f"Validation: expected={expected_chunks} actual={actual_chunks}",
-            level=logging.INFO,
-        )
-        is_count_valid = actual_chunks == expected_chunks
-        validation_limit = max(1, self.settings.ingest.validation_sample_k)
-        sample_texts = ["Статья 1", "договор", "наследство"]
-        health_ok = False
-        if is_count_valid:
-            health_ok = self.vector_store.health_probe(
-                target_collection,
-                sample_texts=sample_texts,
-                limit=validation_limit,
-            )
-            report(
-                f"Health probe for {target_collection}: {health_ok}",
-                level=logging.INFO,
-            )
-        else:
-            logger.error(
-                "Validation count mismatch for %s (expected=%s actual=%s)",
-                target_collection,
-                expected_chunks,
-                actual_chunks,
-            )
-
-        if is_count_valid and health_ok:
-            if self.settings.ingest.dry_run:
-                report(
-                    "Dry-run enabled; skipping alias swap despite successful validation",
-                    level=logging.INFO,
+                verification_log = self.repository.verification_log_path()
+                result = run_verification(
+                    self.settings,
+                    log_path=verification_log,
                 )
-            else:
-                self.vector_store.swap_alias_atomically(alias, target_collection)
-                report(
-                    f"Alias swap OK → {alias} → {target_collection}",
-                    level=logging.INFO,
-                )
-                self.vector_store.cleanup_old_collections(alias, keep_n=2)
-        else:
-            failure_reason = (
-                "count mismatch" if not is_count_valid else "health probe failure"
-            )
-            message = f"Validation failed; alias not swapped ({failure_reason})"
-            logger.error(message)
-            report(message, level=logging.ERROR)
-
-        return IngestStats(
-            files_processed=len(processed_documents),
-            chunks_created=len(changed_chunks),
-            skipped=skipped,
-        )
-
-    def _run_post_ingest_verification(
-        self,
-        report: Callable[[str], None],
-        progress_cb: Callable[[str], None] | None,
-    ) -> None:
-        try:
-            from verify import run_verification  # local import to avoid cycles during packaging
-
-            verification_log = self.repository.verification_log_path()
-            result = run_verification(
-                self.settings,
-                log_path=verification_log,
-            )
-        except Exception as exc:
-            message = f"Post-ingestion verification failed unexpectedly: {exc}"
-            logger.error(message)
-            if progress_cb:
-                progress_cb(message)
-            raise
-        else:
-            prefix = (
-                "Post-ingestion verification detected issues:"
-                if (result.failures or result.warnings)
-                else "Post-ingestion verification completed successfully."
-            )
-            logger.info(prefix)
-            report(prefix)
-            if progress_cb:
-                progress_cb(prefix)
-
-            for message in result.info:
-                logger.info(message)
-                if progress_cb:
-                    progress_cb(message)
-
-            for warning in result.warnings:
-                warning_msg = f"WARNING: {warning}"
-                logger.warning(warning_msg)
-                if progress_cb:
-                    progress_cb(warning_msg)
-
-            if result.failures:
-                for failure in result.failures:
-                    logger.error(failure)
-                    if progress_cb:
-                        progress_cb(failure)
-                message = (
-                    "Verification checks failed after ingestion. See verification log for details."
-                )
+            except Exception as exc:
+                message = f"Post-ingestion verification failed unexpectedly: {exc}"
                 logger.error(message)
                 if progress_cb:
                     progress_cb(message)
-                raise RuntimeError(message)
+                raise
+            else:
+                prefix = (
+                    "Post-ingestion verification detected issues:"
+                    if (result.failures or result.warnings)
+                    else "Post-ingestion verification completed successfully."
+                )
+                logger.info(prefix)
+                if progress_cb:
+                    progress_cb(prefix)
+
+                for message in result.info:
+                    logger.info(message)
+                    if progress_cb:
+                        progress_cb(message)
+
+                for warning in result.warnings:
+                    warning_msg = f"WARNING: {warning}"
+                    logger.warning(warning_msg)
+                    if progress_cb:
+                        progress_cb(warning_msg)
+
+                if result.failures:
+                    for failure in result.failures:
+                        logger.error(failure)
+                        if progress_cb:
+                            progress_cb(failure)
+                    message = (
+                        "Verification checks failed after ingestion. See verification log for details."
+                    )
+                    logger.error(message)
+                    if progress_cb:
+                        progress_cb(message)
+                    raise RuntimeError(message)
+
+        return stats
