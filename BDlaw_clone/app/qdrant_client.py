@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import gzip
 import logging
 import random
 import time
@@ -46,18 +44,10 @@ class QdrantVectorStore:
             raise ValueError("Qdrant URL must be configured")
 
         timeout = httpx.Timeout(
-            timeout=max(
-                settings.qdrant.read_timeout_seconds,
-                settings.qdrant.write_timeout_seconds,
-            ),
+            timeout=settings.qdrant.read_timeout_seconds,
             connect=settings.qdrant.connect_timeout_seconds,
             read=settings.qdrant.read_timeout_seconds,
             write=settings.qdrant.write_timeout_seconds,
-        )
-
-        limits = httpx.Limits(
-            max_connections=100,
-            max_keepalive_connections=20,
         )
 
         client_kwargs: dict[str, object] = {
@@ -103,7 +93,6 @@ class QdrantVectorStore:
             self._server_version or "<unknown>",
             settings.openai_models.embedding,
         )
-        self._http_client = httpx.Client(http2=True, timeout=timeout, limits=limits)
         self._target_batch_bytes = max(1024, settings.qdrant.target_batch_bytes)
         self._title_max_chars = max(0, settings.qdrant.title_max_chars)
         self._body_max_chars = max(0, settings.qdrant.preview_max_chars)
@@ -114,9 +103,6 @@ class QdrantVectorStore:
         )
         self._wait_for_upsert = settings.qdrant.upsert_wait
         self._ordering = settings.qdrant.upsert_ordering or "weak"
-        self._max_batch_size = max(1, settings.qdrant.max_batch_size)
-        self._min_batch_size = max(1, min(self._max_batch_size, settings.qdrant.min_batch_size))
-        self._use_wait = settings.qdrant.use_wait
 
     @property
     def collection_name(self) -> str:
@@ -181,51 +167,6 @@ class QdrantVectorStore:
             self._delete_collection(previous)
         target = alias if swapped else new_collection
         self._ensure_payload_indexes(target)
-
-    def ensure_shadow_collection(
-        self, alias: str, dim: int, on_disk: bool = True
-    ) -> str:
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        base_name = f"{alias}_shadow_d{dim}_{timestamp}"
-        candidate = base_name
-        suffix = 0
-        logger.info(
-            "Provisioning shadow collection for alias %s (dim=%d)", alias, dim
-        )
-        while True:
-            try:
-                vectors_config = _make_vector_config(dim)
-                if on_disk:
-                    try:
-                        items = vectors_config.items()
-                    except Exception:
-                        items = []
-                    for _, params in items:
-                        try:
-                            setattr(params, "on_disk", True)
-                        except Exception:
-                            continue
-                self._client.create_collection(
-                    collection_name=candidate,
-                    vectors_config=vectors_config,
-                    hnsw_config=_make_hnsw_config(),
-                    optimizers_config=_make_optimizer_config(),
-                )
-            except Exception as exc:
-                message = str(exc).lower()
-                if "exists" in message or "already" in message:
-                    suffix += 1
-                    candidate = f"{base_name}_{suffix}"
-                    continue
-                logger.exception(
-                    "Failed to create shadow collection %s for alias %s", candidate, alias
-                )
-                raise
-            self._ensure_payload_indexes(candidate)
-            logger.info(
-                "Shadow collection ready: alias=%s target=%s", alias, candidate
-            )
-            return candidate
 
     def reset_collection(self, embedding_model: str) -> None:
         if not self._allow_destructive:
@@ -457,64 +398,6 @@ class QdrantVectorStore:
             return None
         return rest.Filter(must=conditions)
 
-    def build_law_filters(
-        self,
-        *,
-        as_of_date: Optional[str] = None,
-        status: Optional[str] = None,
-        part_no: Optional[int] = None,
-        chapter_no: Optional[int] = None,
-        article_no_int: Optional[int] = None,
-    ) -> Optional[rest.Filter]:
-        conditions: List[rest.FieldCondition] = []
-        if status:
-            conditions.append(
-                rest.FieldCondition(
-                    key="law_meta.status",
-                    match=rest.MatchValue(value=status),
-                )
-            )
-        if as_of_date:
-            as_of_int = _date_string_to_int(as_of_date)
-            if as_of_int is not None:
-                if hasattr(rest, "Range"):
-                    conditions.append(
-                        rest.FieldCondition(
-                            key="law_meta.date_from_int",
-                            range=rest.Range(lte=as_of_int),
-                        )
-                    )
-                    conditions.append(
-                        rest.FieldCondition(
-                            key="law_meta.date_to_int",
-                            range=rest.Range(gte=as_of_int),
-                        )
-                    )
-        if part_no is not None:
-            conditions.append(
-                rest.FieldCondition(
-                    key="hierarchy.part_no",
-                    match=rest.MatchValue(value=int(part_no)),
-                )
-            )
-        if chapter_no is not None:
-            conditions.append(
-                rest.FieldCondition(
-                    key="hierarchy.chapter_no",
-                    match=rest.MatchValue(value=int(chapter_no)),
-                )
-            )
-        if article_no_int is not None:
-            conditions.append(
-                rest.FieldCondition(
-                    key="hierarchy.article_no_int",
-                    match=rest.MatchValue(value=int(article_no_int)),
-                )
-            )
-        if not conditions:
-            return None
-        return rest.Filter(must=conditions)
-
     def combine_filters(self, *filters: Optional[rest.Filter]) -> Optional[rest.Filter]:
         active = [flt for flt in filters if flt is not None]
         if not active:
@@ -596,15 +479,9 @@ class QdrantVectorStore:
         chunks: Sequence[ChunkRecord],
         title_vectors: Dict[str, List[float]],
         body_vectors: Dict[str, List[float]],
-        *,
-        collection_override: str | None = None,
     ) -> None:
         if not chunks:
             return
-        previous_collection = self._write_collection_name
-        target_collection = collection_override or self.collection_name
-        if collection_override:
-            self._write_collection_name = collection_override
         expected_dim = len(next(iter(body_vectors.values()))) if body_vectors else 0
         points: List[rest.PointStruct] = []
         estimated_bytes = 0
@@ -649,15 +526,6 @@ class QdrantVectorStore:
                 "title_sha256": chunk.title_sha256,
                 "body_sha256": chunk.body_sha256,
             }
-            if self.settings.payload.slim_body_text:
-                try:
-                    body_bytes = chunk.body_text.encode("utf-8")
-                    if len(body_bytes) > 512:
-                        payload["body_text_gzip_b64"] = base64.b64encode(
-                            gzip.compress(body_bytes)
-                        ).decode("ascii")
-                except Exception:
-                    logger.debug("Payload slimming skipped for chunk %s", point_id)
             point = rest.PointStruct(
                 id=point_id,
                 vector={
@@ -674,45 +542,20 @@ class QdrantVectorStore:
             points.append(point)
             estimated_bytes += point_bytes
         if points:
-            self._upsert_batch(
-                points,
-                expected_dim,
-                estimated_bytes,
-                collection_override=target_collection,
-            )
-        if collection_override:
-            self._write_collection_name = previous_collection
+            self._upsert_batch(points, expected_dim, estimated_bytes)
 
     def _upsert_batch(
-        self,
-        points: List[rest.PointStruct],
-        vector_dim: int,
-        estimated_bytes: float,
-        *,
-        collection_override: str | None = None,
+        self, points: List[rest.PointStruct], vector_dim: int, estimated_bytes: float
     ) -> None:
         logger.info(
             "[UPSERT] collection=%s points=%d dim=%d bytes~=%.0f",
-            collection_override or self.collection_name,
+            self.collection_name,
             len(points),
             vector_dim,
             estimated_bytes,
         )
-        if self._max_batch_size:
-            self._upsert_points_dynamic(
-                points,
-                vector_dim,
-                estimated_bytes,
-                collection_override=collection_override,
-            )
-            return
-        # DEPRECATED: legacy static batching path retained for compatibility.
         try:
-            self._commit_upsert(
-                points,
-                estimated_bytes,
-                collection_override=collection_override,
-            )
+            self._commit_upsert(points, estimated_bytes)
         except Exception as exc:
             if len(points) > 1 and _is_timeout_error(exc):
                 split = max(1, len(points) // 2)
@@ -725,27 +568,17 @@ class QdrantVectorStore:
                 left = points[:split]
                 right = points[split:]
                 self._upsert_batch(
-                    left,
-                    vector_dim,
-                    self._estimate_points_bytes(left, vector_dim),
-                    collection_override=collection_override,
+                    left, vector_dim, self._estimate_points_bytes(left, vector_dim)
                 )
                 self._upsert_batch(
-                    right,
-                    vector_dim,
-                    self._estimate_points_bytes(right, vector_dim),
-                    collection_override=collection_override,
+                    right, vector_dim, self._estimate_points_bytes(right, vector_dim)
                 )
                 return
             logger.exception("Failed to upsert batch with %d points", len(points))
             raise
 
     def _commit_upsert(
-        self,
-        points: List[rest.PointStruct],
-        estimated_bytes: float,
-        *,
-        collection_override: str | None = None,
+        self, points: List[rest.PointStruct], estimated_bytes: float
     ) -> None:
         attempt = 0
         delay = self._retry_initial_delay
@@ -753,15 +586,10 @@ class QdrantVectorStore:
             attempt += 1
             try:
                 self._client.upsert(
-                    collection_name=collection_override or self.collection_name,
+                    collection_name=self.collection_name,
                     points=points,
-                    wait=self._use_wait if self._use_wait is not None else self._wait_for_upsert,
+                    wait=self._wait_for_upsert,
                     ordering=self._ordering,
-                )
-                logger.info(
-                    "Upsert batch=%d succeeded for collection %s",
-                    len(points),
-                    collection_override or self.collection_name,
                 )
                 return
             except Exception as exc:
@@ -782,143 +610,6 @@ class QdrantVectorStore:
                 )
                 time.sleep(sleep_for)
                 delay = min(delay * 2, self._retry_max_delay)
-
-    def _upsert_points_dynamic(
-        self,
-        points: Sequence[rest.PointStruct],
-        vector_dim: int,
-        estimated_bytes: float,
-        *,
-        collection_override: str | None = None,
-    ) -> None:
-        batch_size = min(self._max_batch_size, len(points))
-        index = 0
-        attempts: dict[int, int] = {}
-        wait_flag = self._use_wait if self._use_wait is not None else self._wait_for_upsert
-        while index < len(points):
-            current_batch_size = min(batch_size, len(points) - index)
-            batch = list(points[index : index + current_batch_size])
-            attempts.setdefault(current_batch_size, 0)
-            attempts[current_batch_size] += 1
-            try:
-                self._client.upsert(
-                    collection_name=collection_override or self.collection_name,
-                    points=batch,
-                    wait=wait_flag,
-                    ordering=self._ordering,
-                )
-                logger.info(
-                    "Upsert batch=%d succeeded for collection %s",
-                    len(batch),
-                    collection_override or self.collection_name,
-                )
-                index += current_batch_size
-            except Exception as exc:
-                if not _is_timeout_error(exc) and not isinstance(exc, httpx.WriteTimeout):
-                    logger.exception(
-                        "Upsert failed for batch=%d in collection %s",
-                        len(batch),
-                        collection_override or self.collection_name,
-                    )
-                    raise
-                if current_batch_size <= self._min_batch_size:
-                    logger.error(
-                        "Upsert batch=%d failed at minimum batch size for %s",
-                        current_batch_size,
-                        collection_override or self.collection_name,
-                    )
-                    raise
-                batch_size = max(self._min_batch_size, current_batch_size // 2)
-                jitter = random.uniform(0.25, 0.75)
-                sleep_for = min(self._retry_max_delay, self._retry_initial_delay + jitter)
-                logger.warning(
-                    "Upsert batch=%d failed; shrinking batch to %d and retrying in %.2fs",
-                    current_batch_size,
-                    batch_size,
-                    sleep_for,
-                )
-                time.sleep(sleep_for)
-
-    def health_probe(
-        self,
-        collection: str,
-        sample_texts: Sequence[str],
-        limit: int = 5,
-    ) -> bool:
-        try:
-            points, _ = self._client.scroll(
-                collection_name=collection,
-                limit=max(1, limit),
-                with_payload=True,
-            )
-        except Exception as exc:
-            logger.error("Health probe failed for %s: %s", collection, exc)
-            return False
-        if not points:
-            logger.warning("Health probe found no points in %s", collection)
-            return False
-        lowered = [text.lower() for text in sample_texts if text]
-        matches = 0
-        for point in points:
-            payload = getattr(point, "payload", {}) or {}
-            body = str(payload.get("body_text") or "").lower()
-            title = str(payload.get("title_text") or "").lower()
-            if any(sample in body or sample in title for sample in lowered):
-                matches += 1
-        logger.info(
-            "Health probe for %s: matches=%d/%d",
-            collection,
-            matches,
-            len(points),
-        )
-        return bool(lowered) and matches > 0 or not lowered
-
-    def swap_alias_atomically(self, alias: str, new_collection: str) -> None:
-        operations: List[dict[str, dict[str, str]]] = [
-            {"create_alias": {"alias_name": alias, "collection_name": new_collection}}
-        ]
-        try:
-            if hasattr(self._client, "update_aliases"):
-                self._client.update_aliases(change_aliases_operations=operations)
-            else:
-                self._client.update_collection_aliases(
-                    change_aliases_operations=operations
-                )
-        except Exception as exc:
-            logger.error(
-                "Atomic alias swap failed for %s -> %s: %s",
-                alias,
-                new_collection,
-                exc,
-            )
-            raise
-        self._write_collection_name = self._alias_name
-        logger.info("Alias swap OK -> %s -> %s", alias, new_collection)
-
-    def cleanup_old_collections(self, alias: str, keep_n: int = 2) -> None:
-        try:
-            aliases = self._client.get_aliases()
-            collections = getattr(aliases, "aliases", [])
-        except Exception as exc:
-            logger.warning("Failed to list aliases for cleanup: %s", exc)
-            return
-        linked = [
-            getattr(description, "collection_name", "")
-            for description in collections
-            if getattr(description, "alias_name", "") == alias
-        ]
-        logger.info(
-            "Cleanup inspection for alias %s: collections=%s (keeping %d)",
-            alias,
-            linked,
-            keep_n,
-        )
-        # Edit-only rule: we log candidates but avoid destructive deletes.
-        if len(linked) <= keep_n:
-            return
-        logger.info(
-            "TODO: evaluate safe removal of collections beyond keep_n=%d", keep_n
-        )
 
     def _estimate_point_bytes(
         self,
@@ -1041,12 +732,13 @@ class QdrantVectorStore:
             logger.warning("Failed to delete legacy collection %s: %s", collection, exc)
 
 
-    def count_points(self, collection: str | None = None) -> int:
-        target = collection or self.collection_name
+    def count_points(self) -> int:
         try:
-            response = self._client.count(collection_name=target, exact=True)
+            response = self._client.count(
+                collection_name=self.collection_name, exact=True
+            )
         except Exception:
-            logger.exception("Failed to count points for collection %s", target)
+            logger.exception("Failed to count points for collection %s", self.collection_name)
             raise
         return int(getattr(response, "count", 0))
 

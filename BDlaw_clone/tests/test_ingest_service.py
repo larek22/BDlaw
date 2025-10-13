@@ -61,7 +61,6 @@ class DummyEmbeddingClient:
 
 class DummyVectorStore:
     collection_name = "kb_docs_v1"
-    alias_name = "kb_docs_active"
 
     def __init__(self) -> None:
         self.ensure_calls: List[tuple[str, bool]] = []
@@ -69,16 +68,9 @@ class DummyVectorStore:
         self.upserted: List[ChunkRecord] = []
         self.endpoint_url = "http://dummy"
         self.purged_prefixes: List[str] = []
-        self.shadow_collection = "kb_docs_shadow"
-        self.alias_swaps = 0
-        self.cleanup_calls = 0
 
     def ensure_collection(self, embedding_model: str, recreate: bool = False) -> None:
         self.ensure_calls.append((embedding_model, recreate))
-
-    def ensure_shadow_collection(self, alias: str, dim: int, on_disk: bool = True) -> str:
-        self.shadow_collection = f"{alias}_shadow"
-        return self.shadow_collection
 
     def delete_documents(self, doc_ids: Iterable[str]) -> None:
         self.deleted_ids.extend(doc_ids)
@@ -86,7 +78,7 @@ class DummyVectorStore:
     def vector_size_for_model(self, model: str) -> int:
         return 3
 
-    def count_points(self, collection: str | None = None) -> int:
+    def count_points(self) -> int:
         return len(self.upserted)
 
     def count_points_with_prefix(self, prefix: str) -> int:
@@ -99,26 +91,8 @@ class DummyVectorStore:
                 counts[chunk.doc_id] += 1
         return counts
 
-    def upsert_chunks(
-        self,
-        chunks: Iterable[ChunkRecord],
-        title_vectors,
-        body_vectors,
-        *,
-        collection_override: str | None = None,
-    ) -> None:
+    def upsert_chunks(self, chunks: Iterable[ChunkRecord], title_vectors, body_vectors) -> None:
         self.upserted = list(chunks)
-        if collection_override:
-            self.shadow_collection = collection_override
-
-    def health_probe(self, collection: str, sample_texts, limit: int = 5) -> bool:
-        return True
-
-    def swap_alias_atomically(self, alias: str, new_collection: str) -> None:
-        self.alias_swaps += 1
-
-    def cleanup_old_collections(self, alias: str, keep_n: int = 2) -> None:
-        self.cleanup_calls += 1
 
     def purge_orphans(self, prefixes: Iterable[str]) -> int:
         self.purged_prefixes = list(prefixes)

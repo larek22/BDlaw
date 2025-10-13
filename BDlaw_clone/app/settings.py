@@ -67,10 +67,7 @@ class QdrantSettings(BaseModel):
     grpc_port: int = Field(default_factory=lambda: _env_int("QDRANT_GRPC_PORT", 6334))
     connect_timeout_seconds: float = Field(default_factory=lambda: _env_float("QDRANT_CONNECT_TIMEOUT", 30.0))
     read_timeout_seconds: float = Field(default_factory=lambda: _env_float("QDRANT_READ_TIMEOUT", 120.0))
-    write_timeout_seconds: float = Field(default_factory=lambda: _env_float("QDRANT_WRITE_TIMEOUT", 240.0))
-    max_batch_size: int = Field(default_factory=lambda: _env_int("QDRANT_MAX_BATCH_SIZE", 128))
-    min_batch_size: int = Field(default_factory=lambda: _env_int("QDRANT_MIN_BATCH_SIZE", 16))
-    use_wait: bool = Field(default_factory=lambda: _env_bool("QDRANT_USE_WAIT", False))
+    write_timeout_seconds: float = Field(default_factory=lambda: _env_float("QDRANT_WRITE_TIMEOUT", 120.0))
     target_batch_bytes: int = Field(default_factory=lambda: _env_int("INGEST_TARGET_BATCH_BYTES", 2_000_000))
     max_retries: int = Field(default_factory=lambda: max(1, _env_int("QDRANT_MAX_RETRIES", 5)))
     retry_initial_delay: float = Field(default_factory=lambda: _env_float("QDRANT_RETRY_INITIAL_DELAY", 1.0))
@@ -86,12 +83,6 @@ class QdrantSettings(BaseModel):
 class IngestSettings(BaseModel):
     chunk_size_chars: int = Field(default_factory=lambda: _env_int("CHUNK_SIZE", 1200))
     chunk_overlap_chars: int = Field(default_factory=lambda: _env_int("CHUNK_OVERLAP", 120))
-    chunk_size_tokens: int = Field(default_factory=lambda: _env_int("INGEST_CHUNK_SIZE_TOKENS", 1200))
-    overlap_tokens: int = Field(default_factory=lambda: _env_int("INGEST_CHUNK_OVERLAP_TOKENS", 120))
-    validation_sample_k: int = Field(default_factory=lambda: _env_int("INGEST_VALIDATION_SAMPLE_K", 8))
-    atomic_alias_swap: bool = Field(default_factory=lambda: _env_bool("INGEST_ATOMIC_ALIAS_SWAP", True))
-    dry_run: bool = Field(default_factory=lambda: _env_bool("INGEST_DRY_RUN", False))
-    enable_new_loaders: bool = Field(default_factory=lambda: _env_bool("INGEST_ENABLE_NEW_LOADERS", False))
 
     model_config = {"extra": "ignore", "validate_assignment": True}
 
@@ -112,10 +103,6 @@ class QuerySettings(BaseModel):
     reranker_cache_ttl_seconds: int = Field(default_factory=lambda: _env_int("RERANKER_CACHE_TTL", 300))
     reranker_batch_size: int = Field(default_factory=lambda: max(1, _env_int("RERANKER_BATCH_SIZE", 8)))
     reranker_top_n: int = Field(default_factory=lambda: max(1, _env_int("RERANKER_TOP_N", 12)))
-    enable_law_filters: bool = Field(default_factory=lambda: _env_bool("QUERY_ENABLE_LAW_FILTERS", True))
-    hierarchy_part_no: int | None = Field(default=None)
-    hierarchy_chapter_no: int | None = Field(default=None)
-    hierarchy_article_no_int: int | None = Field(default=None)
 
     model_config = {"extra": "ignore", "validate_assignment": True}
 
@@ -126,16 +113,6 @@ class PlannerSettings(BaseModel):
     max_tokens: int = Field(default_factory=lambda: _env_int("PLANNER_MAX_TOKENS", 700))
     prompt_version: str = Field(default_factory=lambda: _env_str("PLANNER_PROMPT_VERSION", "v1.0") or "v1.0")
     sample_bytes: int = Field(default_factory=lambda: _env_int("PLANNER_SAMPLE_BYTES", 20000))
-    gpt41_budget_tokens_per_file: int = Field(
-        default_factory=lambda: _env_int("PLANNER_GPT41_BUDGET_TOKENS", 60000)
-    )
-    enable_cache: bool = Field(default_factory=lambda: _env_bool("PLANNER_ENABLE_CACHE", True))
-
-    model_config = {"extra": "ignore", "validate_assignment": True}
-
-
-class PayloadSettings(BaseModel):
-    slim_body_text: bool = Field(default_factory=lambda: _env_bool("PAYLOAD_SLIM_BODY_TEXT", False))
 
     model_config = {"extra": "ignore", "validate_assignment": True}
 
@@ -149,7 +126,7 @@ class ChunkingSettings(BaseModel):
 
 
 class OcrSettings(BaseModel):
-    enabled: bool = Field(default_factory=lambda: _env_bool("OCR_ENABLED", False))
+    enabled: bool = Field(default_factory=lambda: _env_bool("OCR_ENABLED", True))
     min_text_chars: int = Field(default_factory=lambda: _env_int("OCR_MIN_TEXT_CHARS", 800))
     min_average_chars_per_line: float = Field(
         default_factory=lambda: float(_env_float("OCR_MIN_AVG_CHARS", 5.0))
@@ -187,7 +164,6 @@ class AppSettings(BaseModel):
     ocr: OcrSettings = Field(default_factory=OcrSettings)
     router: RouterSettings = Field(default_factory=RouterSettings)
     verification: VerificationSettings = Field(default_factory=VerificationSettings)
-    payload: PayloadSettings = Field(default_factory=PayloadSettings)
     allow_destructive_migrations: bool = Field(default_factory=lambda: _env_bool("ALLOW_DESTRUCTIVE", False))
 
     model_config = {"extra": "ignore", "validate_assignment": True}

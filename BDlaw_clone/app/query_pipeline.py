@@ -233,17 +233,6 @@ class QueryPipeline:
         if temporal_filter:
             filters.append(temporal_filter)
 
-        if self.settings.query.enable_law_filters:
-            law_filter = self.vector_store.build_law_filters(
-                as_of_date=self.settings.query.as_of_date,
-                status=self.settings.query.status_filter or "in_force",
-                part_no=self.settings.query.hierarchy_part_no,
-                chapter_no=self.settings.query.hierarchy_chapter_no,
-                article_no_int=self.settings.query.hierarchy_article_no_int,
-            )
-            if law_filter:
-                filters.append(law_filter)
-
         return self.vector_store.combine_filters(*filters)
 
     def _tokenize_query(self, query: str) -> List[str]:

@@ -89,13 +89,6 @@ class EmbeddingClient:
         self._total_cached = 0
         self._total_requests = 0
         self._total_tokens = 0
-        self.chunk_size_tokens = settings.ingest.chunk_size_tokens
-        self.chunk_overlap_tokens = settings.ingest.overlap_tokens
-        logger.info(
-            "Embedding client configured (chunk_tokens=%d overlap_tokens=%d)",
-            self.chunk_size_tokens,
-            self.chunk_overlap_tokens,
-        )
 
     def embed_texts(
         self,
