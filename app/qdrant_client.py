@@ -143,7 +143,11 @@ class QdrantVectorStore:
         if self._min_batch_size > self._max_batch_size:
             self._min_batch_size = self._max_batch_size
         self._wait_for_upsert = settings.qdrant.use_wait
-        self._ordering = settings.qdrant.upsert_ordering or "weak"
+        self._ordering_preference = (settings.qdrant.upsert_ordering or "weak").strip().lower()
+        self._prefer_grpc = bool(
+            getattr(getattr(self._client, "_client", None), "_prefer_grpc", settings.qdrant.prefer_grpc)
+        )
+        self._ordering = self._resolve_write_ordering(self._ordering_preference)
 
     @property
     def collection_name(self) -> str:
@@ -164,6 +168,45 @@ class QdrantVectorStore:
     @property
     def client(self) -> QdrantClient:
         return self._client
+
+    def _resolve_write_ordering(self, preference: str | None) -> object | None:
+        if not preference:
+            return None
+        normalized = preference.strip().lower()
+        aliases = {
+            "weak": ("Weak", "WEAK"),
+            "medium": ("Medium", "MEDIUM"),
+            "strong": ("Strong", "STRONG"),
+        }
+        if normalized not in aliases:
+            logger.warning(
+                "Unknown write ordering '%s'; defaulting to 'weak' for compatibility",
+                preference,
+            )
+            normalized = "weak"
+        grpc_name, rest_name = aliases[normalized]
+        if self._prefer_grpc:
+            try:
+                from qdrant_client.grpc import points_pb2
+
+                value = points_pb2.WriteOrderingType.Value(grpc_name)
+                return points_pb2.WriteOrdering(type=value)
+            except Exception:  # pragma: no cover - dependent on installed qdrant-client
+                logger.warning(
+                    "gRPC write ordering '%s' unavailable; falling back to default", grpc_name,
+                )
+                return None
+        try:
+            from qdrant_client.http import models as rest
+
+            return getattr(rest.WriteOrdering, rest_name)
+        except Exception:  # pragma: no cover - dependent on installed qdrant-client
+            logger.debug(
+                "REST write ordering '%s' unavailable; using plain preference string",
+                rest_name,
+                exc_info=True,
+            )
+            return normalized
 
     def ensure_collection(self, embedding_model: str, recreate: bool = False) -> None:
         alias = self.alias_name
@@ -747,12 +790,13 @@ class QdrantVectorStore:
         delay = self._retry_initial_delay
         while True:
             attempt += 1
+            ordering = self._ordering
             try:
                 self._client.upsert(
                     collection_name=target_collection,
                     points=points,
                     wait=self._wait_for_upsert,
-                    ordering=self._ordering,
+                    ordering=ordering,
                 )
                 logger.info(
                     "Upsert batch=%d succeeded; collection=%s bytes~=%.0f",
@@ -762,6 +806,13 @@ class QdrantVectorStore:
                 )
                 return
             except Exception as exc:
+                if ordering is not None and _is_ordering_type_error(exc):
+                    logger.warning(
+                        "Write ordering preference '%s' rejected by client; retrying without explicit ordering",
+                        self._ordering_preference,
+                    )
+                    self._ordering = None
+                    continue
                 is_timeout = _is_timeout_error(exc)
                 if not is_timeout or attempt >= self._max_retry_attempts:
                     raise
@@ -1275,6 +1326,22 @@ class QdrantVectorStore:
 
     def vector_size_for_model(self, model: str) -> int:
         return _vector_size_for_model(model)
+
+
+def _is_ordering_type_error(exc: Exception) -> bool:
+    message = str(exc)
+    lowered = message.lower()
+    if isinstance(exc, TypeError) and ("writeordering" in lowered or "ordering" in lowered):
+        return True
+    if "writeordering" in lowered or "upsertpoints.ordering" in lowered:
+        return True
+    cause = getattr(exc, "__cause__", None)
+    if cause and _is_ordering_type_error(cause):
+        return True
+    context = getattr(exc, "__context__", None)
+    if context and _is_ordering_type_error(context):
+        return True
+    return False
 
 
 def _is_timeout_error(exc: Exception | None) -> bool:
