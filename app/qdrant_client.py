@@ -951,6 +951,55 @@ class QdrantVectorStore:
                 new_collection,
                 exc,
             )
+            # DEPRECATED: earlier versions aborted here which left the alias
+            # pointing at the previous collection (or missing entirely). The
+            # fallback below mirrors the legacy REST helpers to keep aliases
+            # consistent even when the structured AliasOperations model is not
+            # accepted by the installed qdrant-client release.
+            create_alias = getattr(self._client, "create_alias", None)
+            delete_alias = getattr(self._client, "delete_alias", None)
+            if create_alias is not None:
+                try:
+                    if previous and previous != new_collection and delete_alias:
+                        delete_kwargs: dict[str, str] = {"alias_name": alias}
+                        try:
+                            delete_alias(**delete_kwargs)
+                        except TypeError:
+                            # Some client versions expect an explicit collection name.
+                            delete_kwargs["collection_name"] = previous
+                            delete_alias(**delete_kwargs)
+
+                    create_kwargs: dict[str, str] = {
+                        "alias_name": alias,
+                        "collection_name": new_collection,
+                    }
+                    try:
+                        create_alias(**create_kwargs)
+                    except TypeError:
+                        # Older clients sometimes reverse the keyword order.
+                        create_kwargs = {
+                            "collection_name": new_collection,
+                            "alias_name": alias,
+                        }
+                        create_alias(**create_kwargs)
+                except Exception as alias_exc:  # pragma: no cover - network/client specific
+                    logger.error(
+                        "Alias management fallback failed for %s -> %s: %s",
+                        alias,
+                        new_collection,
+                        alias_exc,
+                    )
+                    self._write_collection_name = new_collection
+                    return False
+                else:
+                    logger.info(
+                        "Alias %s now points to collection %s via legacy fallback",
+                        alias,
+                        new_collection,
+                    )
+                    self._write_collection_name = self._alias_name
+                    return True
+
             self._write_collection_name = new_collection
             return False
 
