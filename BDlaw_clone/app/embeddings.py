@@ -89,13 +89,6 @@ class EmbeddingClient:
         self._total_cached = 0
         self._total_requests = 0
         self._total_tokens = 0
-        self._chunk_size_tokens = settings.ingest.chunk_size_tokens
-        self._chunk_overlap_tokens = settings.ingest.overlap_tokens
-        logger.info(
-            "Embedding chunk policy: size_tokens=%d overlap_tokens=%d",
-            self._chunk_size_tokens,
-            self._chunk_overlap_tokens,
-        )
 
     def embed_texts(
         self,
@@ -193,14 +186,6 @@ class EmbeddingClient:
             "tokens": float(self._total_tokens),
             "cost": cost,
         }
-
-    @property
-    def chunk_size_tokens(self) -> int:
-        return self._chunk_size_tokens
-
-    @property
-    def chunk_overlap_tokens(self) -> int:
-        return self._chunk_overlap_tokens
 
 
 def _estimate_tokens(texts: Sequence[str], model: str) -> int | None:

@@ -84,21 +84,6 @@ def _coerce_int(value: object) -> int | None:
     return None
 
 
-def _date_to_int(value: object | None) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        digits = "".join(ch for ch in value if ch.isdigit())
-        if len(digits) >= 8:
-            try:
-                return int(digits[:8])
-            except ValueError:
-                return None
-    return None
-
-
 def _article_base_from_value(value: object) -> int | None:
     if isinstance(value, int):
         return value
@@ -248,10 +233,6 @@ class QueryPipeline:
         if temporal_filter:
             filters.append(temporal_filter)
 
-        law_filter = self._build_law_filters()
-        if law_filter:
-            filters.append(law_filter)
-
         return self.vector_store.combine_filters(*filters)
 
     def _tokenize_query(self, query: str) -> List[str]:
@@ -315,93 +296,6 @@ class QueryPipeline:
             range=rest.Range(**range_kwargs),
         )
         return rest.Filter(must=[condition])
-
-    def _build_law_filters(self) -> rest.Filter | None:
-        if not getattr(self.settings.query, "enable_law_filters", True):
-            return None
-        must_conditions: List[rest.FieldCondition] = []
-        status = (self.settings.query.status_filter or "").strip()
-        if status:
-            normalized = "in_force" if status.lower() in {"active", "in_force"} else status
-            must_conditions.append(
-                rest.FieldCondition(
-                    key="law_meta.status",
-                    match=rest.MatchValue(value=normalized),
-                )
-            )
-        as_of_value = getattr(self.settings.query, "as_of_date", None)
-        as_of_int = _date_to_int(as_of_value)
-        if as_of_int is not None:
-            if hasattr(rest, "Range"):
-                try:
-                    must_conditions.append(
-                        rest.FieldCondition(
-                            key="law_meta.date_from_int",
-                            range=rest.Range(lte=as_of_int),
-                        )
-                    )
-                    must_conditions.append(
-                        rest.FieldCondition(
-                            key="law_meta.date_to_int",
-                            range=rest.Range(gte=as_of_int),
-                        )
-                    )
-                except TypeError:
-                    must_conditions.append(
-                        rest.FieldCondition(
-                            key="law_meta.date_from_int",
-                            match=rest.MatchValue(value=as_of_int),
-                        )
-                    )
-                    must_conditions.append(
-                        rest.FieldCondition(
-                            key="law_meta.date_to_int",
-                            match=rest.MatchValue(value=as_of_int),
-                        )
-                    )
-            else:
-                must_conditions.append(
-                    rest.FieldCondition(
-                        key="law_meta.date_from_int",
-                        match=rest.MatchValue(value=as_of_int),
-                    )
-                )
-                must_conditions.append(
-                    rest.FieldCondition(
-                        key="law_meta.date_to_int",
-                        match=rest.MatchValue(value=as_of_int),
-                    )
-                )
-        part_filter = getattr(self.settings.query, "part_no", None)
-        part_value = _coerce_int(str(part_filter)) if part_filter is not None else None
-        if part_value is not None:
-            must_conditions.append(
-                rest.FieldCondition(
-                    key="hierarchy.part_no",
-                    match=rest.MatchValue(value=part_value),
-                )
-            )
-        chapter_filter = getattr(self.settings.query, "chapter_no", None)
-        chapter_value = _coerce_int(str(chapter_filter)) if chapter_filter is not None else None
-        if chapter_value is not None:
-            must_conditions.append(
-                rest.FieldCondition(
-                    key="hierarchy.chapter_no",
-                    match=rest.MatchValue(value=chapter_value),
-                )
-            )
-        article_filter = getattr(self.settings.query, "article_no_int", None)
-        article_value = _coerce_int(str(article_filter)) if article_filter is not None else None
-        if article_value is not None:
-            must_conditions.append(
-                rest.FieldCondition(
-                    key="hierarchy.article_no_int",
-                    match=rest.MatchValue(value=article_value),
-                )
-            )
-        if not must_conditions:
-            return None
-        return rest.Filter(must=must_conditions)
 
     def _fuse_results(
         self,
