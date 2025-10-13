@@ -8,7 +8,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import List, Sequence
 
 from openai import OpenAI
 
@@ -89,13 +89,6 @@ class EmbeddingClient:
         self._total_cached = 0
         self._total_requests = 0
         self._total_tokens = 0
-        self._chunk_size_tokens = settings.ingest.chunk_size_tokens
-        self._chunk_overlap_tokens = settings.ingest.overlap_tokens
-        logger.info(
-            "Embedding chunk parameters: size_tokens=%d overlap_tokens=%d",
-            self._chunk_size_tokens,
-            self._chunk_overlap_tokens,
-        )
 
     def embed_texts(
         self,
@@ -214,20 +207,3 @@ def _estimate_tokens(texts: Sequence[str], model: str) -> int | None:
         except Exception:
             return None
     return total
-
-
-def maybe_slim_payload(payload: Dict[str, object], settings: AppSettings) -> Dict[str, object]:
-    """Attach lightweight previews without mutating core fields."""
-
-    if not settings.payload.slim_body_text:
-        return payload
-    result = dict(payload)
-    body = result.get("body_text")
-    if isinstance(body, str):
-        result.setdefault("body_text_len", len(body))
-        if len(body) > 2000:
-            result.setdefault("body_text_preview", body[:400])
-    title = result.get("title_text")
-    if isinstance(title, str) and len(title) > 400:
-        result.setdefault("title_text_preview", title[:120])
-    return result

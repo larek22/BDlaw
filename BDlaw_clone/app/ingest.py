@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, List, Sequence
@@ -15,7 +14,6 @@ from .legal_pipeline import (
     normalize_text,
 )
 from .legal_types import ChunkRecord
-from .loaders import load_document
 from .settings import AppSettings
 from .qdrant_client import QdrantVectorStore
 
@@ -24,12 +22,6 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
     from .readers.factory import DocumentReaderFactory
 
 logger = logging.getLogger(__name__)
-
-
-def make_point_id(doc_id: str, chunk_index: int) -> str:
-    """Deterministic UUIDv5 for stable chunk identifiers."""
-
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{doc_id}:{chunk_index}"))
 
 
 @dataclass
@@ -97,29 +89,10 @@ class IngestService:
 
         skipped = 0
         processed_documents: List[ProcessedDocument] = []
-        total_articles = 0
-        total_chunks = 0
 
         for path in paths:
             try:
-                document = None
-                if self.settings.ingest.enable_new_loaders:
-                    try:
-                        document = load_document(
-                            path,
-                            settings=self.settings,
-                            repository=self.repository,
-                        )
-                        if document is not None:
-                            logger.info("New loader parsed %s", path)
-                    except Exception as exc:
-                        logger.warning(
-                            "New loader failed for %s: %s; falling back to legacy reader",
-                            path,
-                            exc,
-                        )
-                if document is None:
-                    document = self.reader_factory.read(path)
+                document = self.reader_factory.read(path)
             except Exception as exc:
                 message = f"Failed to read {path}: {exc}"
                 logger.error(message)
@@ -149,15 +122,6 @@ class IngestService:
                     level=logging.INFO,
                 )
             processed_documents.append(processed)
-            total_articles += len(processed.articles)
-            total_chunks += len(processed.chunks)
-
-        if processed_documents:
-            report(
-                "Parsed %d article(s), %d chunk(s) across %d document(s)"
-                % (total_articles, total_chunks, len(processed_documents)),
-                level=logging.INFO,
-            )
 
         prefix_expected_counts: Dict[str, int] = {}
         doc_expected_counts: Dict[str, int] = {}
@@ -176,49 +140,24 @@ class IngestService:
                     )
                 doc_expected_counts[chunk.doc_id] = doc_expected_counts.get(chunk.doc_id, 0) + 1
                 if chunk.doc_id in changed_set:
-                    chunk.chunk_id = make_point_id(chunk.doc_id, chunk.chunk_index)
                     changed_chunks.append(chunk)
 
         if not changed_chunks:
             return IngestStats(files_processed=0, chunks_created=0, skipped=skipped)
 
         embedding_model = self.settings.openai_models.embedding
-        atomic_enabled = self.settings.ingest.atomic_alias_swap
-        alias_name = self.vector_store.alias_name
-        expected_dim = self.vector_store.vector_size_for_model(embedding_model)
-        if atomic_enabled:
-            target_collection = self.vector_store.ensure_shadow_collection(
-                alias_name,
-                expected_dim,
-            )
-            report(
-                f"Staging ingestion into shadow collection '{target_collection}' for alias {alias_name}",
-                level=logging.INFO,
-            )
-        else:
-            report(
-                f"Ensuring collection '{self.vector_store.collection_name}' for embedding model {embedding_model}",
-                level=logging.INFO,
-            )
-            self.vector_store.ensure_collection(
-                embedding_model=embedding_model,
-                recreate=recreate,
-            )
-            target_collection = self.vector_store.collection_name
+        report(
+            f"Ensuring collection '{self.vector_store.collection_name}' for embedding model {embedding_model}",
+            level=logging.INFO,
+        )
+        self.vector_store.ensure_collection(embedding_model=embedding_model, recreate=recreate)
 
         if changed_doc_ids:
-            if atomic_enabled:
-                report(
-                    "Atomic alias swap enabled; skipping pre-ingest destructive deletes",
-                    level=logging.INFO,
-                )
-                # DEPRECATED: legacy destructive path retained below for compatibility
-            else:
-                report(
-                    f"Deleting {len(changed_doc_ids)} document id(s) prior to upsert",
-                    level=logging.INFO,
-                )
-                self.vector_store.delete_documents(sorted(changed_doc_ids))
+            report(
+                f"Deleting {len(changed_doc_ids)} document id(s) prior to upsert",
+                level=logging.INFO,
+            )
+            self.vector_store.delete_documents(sorted(changed_doc_ids))
 
         self.embedding_client.reset_usage()
 
@@ -263,67 +202,64 @@ class IngestService:
                 f"but received {vector_dim}"
             )
         report(
-            f"[UPSERT] collection={target_collection} points={len(changed_chunks)} dim={vector_dim}",
+            f"[UPSERT] collection={self.vector_store.collection_name} points={len(changed_chunks)} dim={vector_dim}",
             level=logging.INFO,
         )
         logger.debug(
             "Preparing %d point(s) for collection %s on %s",
             len(changed_chunks),
-            target_collection,
+            self.vector_store.collection_name,
             self.vector_store.endpoint_url,
         )
 
         before_count: int | None = None
-        if not atomic_enabled:
-            try:
-                before_count = self.vector_store.count_points()
-            except Exception as exc:
-                message = f"Could not read existing point count: {exc}"
-                logger.warning(message)
-                if progress_cb:
-                    progress_cb(message)
-            else:
-                report(
-                    f"[QDRANT] existing points before ingest: {before_count}",
-                    level=logging.INFO,
-                )
+        try:
+            before_count = self.vector_store.count_points()
+        except Exception as exc:
+            message = f"Could not read existing point count: {exc}"
+            logger.warning(message)
+            if progress_cb:
+                progress_cb(message)
+        else:
+            report(
+                f"[QDRANT] existing points before ingest: {before_count}",
+                level=logging.INFO,
+            )
 
         try:
             self.vector_store.upsert_chunks(
                 changed_chunks,
                 title_vectors=title_vectors,
                 body_vectors=body_vectors,
-                collection=target_collection,
             )
         except Exception:
             logger.exception("Failed to upsert vectors to Qdrant")
             raise
 
-        if not atomic_enabled:
-            try:
-                total_points = self.vector_store.count_points()
-            except Exception:
-                logger.warning("Unable to retrieve Qdrant point count after upsert")
-            else:
-                report(f"[QDRANT] total points now: {total_points}", level=logging.INFO)
-                if before_count is not None:
-                    delta = total_points - before_count
-                    report(
-                        f"[QDRANT] points added or updated in this run: {delta}",
-                        level=logging.INFO,
-                    )
-                    if delta == 0:
-                        report(
-                            "[QDRANT] No new points detected. Existing vectors already match the ingested content."
-                            " Use 'Rebuild' to force a clean re-index if this is unexpected.",
-                            level=logging.INFO,
-                        )
+        try:
+            total_points = self.vector_store.count_points()
+        except Exception:
+            logger.warning("Unable to retrieve Qdrant point count after upsert")
+        else:
+            report(f"[QDRANT] total points now: {total_points}", level=logging.INFO)
+            if before_count is not None:
+                delta = total_points - before_count
                 report(
-                    f"[QDRANT] collection '{self.vector_store.collection_name}' at {self.vector_store.endpoint_url} ready with {total_points} point(s)",
+                    f"[QDRANT] points added or updated in this run: {delta}",
                     level=logging.INFO,
                 )
+                if delta == 0:
+                    report(
+                        "[QDRANT] No new points detected. Existing vectors already match the ingested content."
+                        " Use 'Rebuild' to force a clean re-index if this is unexpected.",
+                        level=logging.INFO,
+                    )
+            report(
+                f"[QDRANT] collection '{self.vector_store.collection_name}' at {self.vector_store.endpoint_url} ready with {total_points} point(s)",
+                level=logging.INFO,
+            )
 
-        if not atomic_enabled and changed_chunks and body_vectors:
+        if changed_chunks and body_vectors:
             try:
                 sample_vector = body_vectors[changed_chunks[0].body_sha256]
                 verify_hits = self.vector_store.query(
@@ -350,7 +286,7 @@ class IngestService:
                 else:
                     report("[VERIFY] sample search returned no hits", level=logging.WARNING)
 
-        if not atomic_enabled and prefix_expected_counts:
+        if prefix_expected_counts:
             try:
                 actual_counts = {
                     prefix: self.vector_store.count_points_with_prefix(prefix)
@@ -433,7 +369,7 @@ class IngestService:
                     level=logging.INFO,
                 )
 
-        if not atomic_enabled and doc_expected_counts:
+        if doc_expected_counts:
             try:
                 actual_doc_counts = self.vector_store.count_points_for_doc_ids(
                     doc_expected_counts.keys()
@@ -467,55 +403,6 @@ class IngestService:
                 "[QDRANT] Document-level counts match expected chunk totals.",
                 level=logging.INFO,
             )
-
-        if atomic_enabled:
-            expected_chunks = len(changed_chunks)
-            try:
-                actual_points = self.vector_store.count_points(target_collection)
-            except Exception as exc:
-                actual_points = -1
-                message = f"Validation count failed for {target_collection}: {exc}"
-                logger.error(message)
-                if progress_cb:
-                    progress_cb(message)
-            report(
-                f"Validation: expected={expected_chunks} actual={actual_points}",
-                level=logging.INFO,
-            )
-            validation_samples: List[str] = ["Статья 1", "договор", "наследство"]
-            sample_limit = max(1, self.settings.ingest.validation_sample_k)
-            for chunk in changed_chunks[:sample_limit]:
-                candidate = (chunk.title_text or chunk.body_text).strip()
-                if candidate:
-                    validation_samples.append(candidate[:120])
-            health_ok = self.vector_store.health_probe(
-                target_collection,
-                validation_samples,
-                limit=sample_limit,
-            )
-            report(
-                f"Health probe for {target_collection}: {health_ok}",
-                level=logging.INFO,
-            )
-            if expected_chunks == actual_points and health_ok:
-                if self.settings.ingest.dry_run:
-                    report(
-                        f"Dry-run mode active; alias swap skipped for {alias_name}",
-                        level=logging.INFO,
-                    )
-                else:
-                    self.vector_store.swap_alias_atomically(alias_name, target_collection)
-                    try:
-                        self.vector_store.cleanup_old_collections(alias_name, keep_n=2)
-                    except Exception as exc:
-                        logger.warning("Cleanup of legacy collections skipped: %s", exc)
-            else:
-                logger.error(
-                    "Validation failed; alias not swapped (expected=%s actual=%s health=%s)",
-                    expected_chunks,
-                    actual_points,
-                    health_ok,
-                )
 
         stats = IngestStats(
             files_processed=len(processed_documents),
