@@ -44,6 +44,11 @@ class QdrantVectorStore:
         if not url:
             raise ValueError("Qdrant URL must be configured")
 
+        client_kwargs: dict[str, object] = {
+            "url": url,
+            "timeout": settings.qdrant.timeout_seconds,
+            "prefer_grpc": settings.qdrant.prefer_grpc,
+        }
         httpx_client: httpx.Client | None = None
         try:
             timeout = httpx.Timeout(
@@ -58,18 +63,10 @@ class QdrantVectorStore:
                 limits=limits,
                 http2=True,
             )
+            client_kwargs["httpx_client"] = httpx_client
         except AttributeError:
             logger.warning("httpx.Timeout unavailable; using scalar timeout configuration")
-            timeout = settings.qdrant.read_timeout_seconds
         self._httpx_client = httpx_client
-
-        client_kwargs: dict[str, object] = {
-            "url": url,
-            "timeout": timeout,
-            "prefer_grpc": settings.qdrant.prefer_grpc,
-        }
-        if httpx_client is not None:
-            client_kwargs["httpx_client"] = httpx_client
         if settings.qdrant.prefer_grpc:
             client_kwargs["grpc_port"] = settings.qdrant.grpc_port
 
@@ -86,7 +83,7 @@ class QdrantVectorStore:
             parsed_url = urlparse(url)
             host = (parsed_url.hostname or "").lower()
             if not api_key:
-                if host in {"localhost", "127.0.0.1", "::1"}:
+                if host in {"localhost", "127.0.0.1", "::1"} or settings.qdrant.allow_insecure_https_without_api_key:
                     logger.warning(
                         "HTTPS endpoint %s missing API key; proceeding for local testing", url
                     )

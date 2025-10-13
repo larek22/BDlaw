@@ -79,6 +79,9 @@ class QdrantSettings(BaseModel):
     max_batch_size: int = Field(default_factory=lambda: max(1, _env_int("QDRANT_MAX_BATCH_SIZE", 128)))
     min_batch_size: int = Field(default_factory=lambda: max(1, _env_int("QDRANT_MIN_BATCH_SIZE", 16)))
     use_wait: bool = Field(default_factory=lambda: _env_bool("QDRANT_USE_WAIT", False))
+    allow_insecure_https_without_api_key: bool = Field(
+        default_factory=lambda: _env_bool("QDRANT_ALLOW_INSECURE_HTTPS", False)
+    )
 
     model_config = {"extra": "ignore", "validate_assignment": True}
 
