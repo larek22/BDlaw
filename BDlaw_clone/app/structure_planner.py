@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
@@ -146,107 +145,6 @@ class StructurePlanner:
             logger.warning("Failed to persist planner cache: %s", exc)
         return plan
 
-
-class AutoStructurePlanner:
-    """Uses heuristics + GPT-4.1 for legal hierarchy extraction."""
-
-    JSON_SCHEMA = {
-        "type": "object",
-        "properties": {
-            "doc_id": {"type": "string"},
-            "hierarchy": {
-                "type": "object",
-                "properties": {
-                    "part_no": {"type": "integer"},
-                    "section_roman": {"type": "string"},
-                    "chapter_no": {"type": "integer"},
-                    "article_no": {"type": "string"},
-                    "article_no_int": {"type": "integer"},
-                },
-                "required": ["article_no", "article_no_int"],
-            },
-            "title_text": {"type": "string"},
-            "body_text": {"type": "string"},
-            "law_meta": {
-                "type": "object",
-                "properties": {
-                    "status": {"type": "string"},
-                    "enact_date_int": {"type": "integer"},
-                    "last_amend_date_int": {"type": "integer"},
-                    "date_from_int": {"type": "integer"},
-                    "date_to_int": {"type": "integer"},
-                },
-            },
-        },
-        "required": ["doc_id", "hierarchy", "title_text", "body_text"],
-    }
-
-    @staticmethod
-    def plan(
-        file_blob: bytes,
-        mime: str,
-        language: str = "ru",
-        hints: dict | None = None,
-    ) -> list[dict]:
-        """
-        1) Heuristic pre-parse (regex headings)
-        2) GPT-4.1 pass only for low-confidence segments
-        3) Validate & normalize fields (roman numerals, decimals: e.g., 783.1, 860.12)
-        4) Return list of ArticleRecord dicts (strict JSON per schema)
-        """
-
-        logger.debug(
-            "AutoStructurePlanner invoked mime=%s language=%s hints=%s", mime, language, hints
-        )
-        blob = file_blob or b""
-        try:
-            text = blob.decode("utf-8", errors="ignore")
-        except Exception:
-            text = blob.decode("latin-1", errors="ignore")
-        doc_id = "auto_doc"
-        if hints and isinstance(hints, dict):
-            doc_id = str(hints.get("doc_id") or doc_id)
-        article_pattern = re.compile(r"Статья\s+(\d+(?:\.\d+)?)\s*(.*)")
-        section_pattern = re.compile(r"Раздел\s+([IVXLCDM]+)", re.IGNORECASE)
-        chapter_pattern = re.compile(r"Глава\s+(\d+)", re.IGNORECASE)
-        matches = list(article_pattern.finditer(text))
-        results: list[dict] = []
-        for index, match in enumerate(matches):
-            article_no = match.group(1)
-            title = match.group(2).strip()
-            start = match.end()
-            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-            body = text[start:end].strip()
-            article_no_int = 0
-            if article_no:
-                try:
-                    article_no_int = int(article_no.replace(".", ""))
-                except ValueError:
-                    article_no_int = 0
-            hierarchy: dict[str, object] = {
-                "article_no": article_no,
-                "article_no_int": article_no_int,
-            }
-            section_slice = text[: match.start()]
-            section_match = section_pattern.search(section_slice)
-            if section_match:
-                hierarchy["section_roman"] = section_match.group(1).upper()
-            chapter_match = chapter_pattern.search(section_slice)
-            if chapter_match:
-                try:
-                    hierarchy["chapter_no"] = int(chapter_match.group(1))
-                except ValueError:
-                    pass
-            record = {
-                "doc_id": doc_id,
-                "hierarchy": hierarchy,
-                "title_text": title or f"Статья {article_no}",
-                "body_text": body,
-                "law_meta": {},
-            }
-            results.append(record)
-        return results
-
     def _generate_plan(self, excerpt: str) -> StructurePlan:
         planner_settings = self.settings.planner
         if not excerpt:
@@ -293,5 +191,4 @@ __all__ = [
     "PlanLevel",
     "SplitConfig",
     "StructurePlanner",
-    "AutoStructurePlanner",
 ]

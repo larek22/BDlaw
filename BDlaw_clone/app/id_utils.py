@@ -11,13 +11,6 @@ import uuid
 _POINT_NAMESPACE = uuid.UUID("5a4d2f02-9f03-5b79-9d58-4af1462b9f0d")
 
 
-def make_atomic_point_id(doc_id: str, chunk_index: int) -> str:
-    """Deterministic UUIDv5 based solely on document id and chunk index."""
-
-    name = f"{doc_id}:{chunk_index}"
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, name))
-
-
 def make_point_id(
     doc_id: str,
     chunk_index: int,
@@ -43,5 +36,5 @@ def make_point_id(
     return str(uuid.uuid5(_POINT_NAMESPACE, name))
 
 
-__all__ = ["make_point_id", "make_atomic_point_id"]
+__all__ = ["make_point_id"]
 

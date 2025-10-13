@@ -43,5 +43,5 @@ combine-as-imports = true
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-addopts = "-q --ignore=BDlaw_clone"
+addopts = "-q"
 pythonpath = ["app"]
