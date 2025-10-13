@@ -6,6 +6,7 @@ import time
 import uuid
 from datetime import datetime
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
+from urllib.parse import urlparse
 
 import httpx
 import importlib.metadata
@@ -82,10 +83,18 @@ class QdrantVectorStore:
 
         self._api_key: Optional[str] = None
         if url.startswith("https://"):
+            parsed_url = urlparse(url)
+            host = (parsed_url.hostname or "").lower()
             if not api_key:
-                raise ValueError("Qdrant API key is required for HTTPS endpoints")
-            client_kwargs["api_key"] = api_key
-            self._api_key = api_key
+                if host in {"localhost", "127.0.0.1", "::1"}:
+                    logger.warning(
+                        "HTTPS endpoint %s missing API key; proceeding for local testing", url
+                    )
+                else:
+                    raise ValueError("Qdrant API key is required for HTTPS endpoints")
+            else:
+                client_kwargs["api_key"] = api_key
+                self._api_key = api_key
         elif url.startswith("http://"):
             if "localhost" not in url and "127.0.0.1" not in url and api_key:
                 client_kwargs["api_key"] = api_key
