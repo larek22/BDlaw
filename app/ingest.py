@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import logging
 import os
-import uuid
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, List, Sequence
 
 from .data_repository import DataRepository
+from .id_utils import make_point_id as _shared_make_point_id
 from .legal_pipeline import (
     LegalCorpusBuilder,
     ProcessedDocument,
@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 def make_point_id(doc_id: str, chunk_index: int) -> str:
     """Deterministic point ids derived from document id and chunk index."""
 
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{doc_id}:{chunk_index}"))
+    # DEPRECATED: direct uuid.uuid5(NAMESPACE_URL, f"{doc_id}:{chunk_index}") implementation
+    # retained for reference. The shared helper now centralises ID generation.
+    return _shared_make_point_id(doc_id, chunk_index)
 
 
 @dataclass
@@ -38,6 +40,8 @@ class IngestStats:
     files_processed: int
     chunks_created: int
     skipped: int
+    alias_swapped: bool = False
+    validation_passed: bool = False
 
 
 class IngestService:
@@ -321,6 +325,7 @@ class IngestService:
                 body_vectors=body_vectors,
                 embedding_model=embedding_model,
                 skipped=skipped,
+                doc_expected_counts=doc_expected_counts,
             )
             usage = self.embedding_client.usage_summary()
             elapsed = time.perf_counter() - start_time if changed_chunks else 0.0
@@ -339,8 +344,21 @@ class IngestService:
                 ),
                 level=logging.INFO,
             )
-            if self.verify_after_ingest and stats.chunks_created > 0:
+            if (
+                self.verify_after_ingest
+                and stats.chunks_created > 0
+                and stats.alias_swapped
+            ):
                 self._run_post_ingest_verification(report, progress_cb)
+            elif (
+                self.verify_after_ingest
+                and stats.chunks_created > 0
+                and not stats.alias_swapped
+            ):
+                report(
+                    "Skipping post-ingest verification because alias swap did not occur",
+                    level=logging.WARNING,
+                )
             return stats
         report(
             f"[UPSERT] collection={self.vector_store.collection_name} points={len(changed_chunks)} dim={vector_dim}",
@@ -513,6 +531,7 @@ class IngestService:
         if doc_expected_counts:
             try:
                 actual_doc_counts = self.vector_store.count_points_for_doc_ids(
+                    self.vector_store.collection_name,
                     doc_expected_counts.keys()
                 )
             except Exception as exc:
@@ -607,6 +626,7 @@ class IngestService:
         body_vectors: Dict[str, List[float]],
         embedding_model: str,
         skipped: int,
+        doc_expected_counts: Dict[str, int],
     ) -> IngestStats:
         alias = self.vector_store.alias_name
         expected_dim = self.vector_store.vector_size_for_model(embedding_model)
@@ -619,10 +639,18 @@ class IngestService:
             level=logging.INFO,
         )
 
+        seen_ids: set[str] = set()
         for chunk in changed_chunks:
             deterministic_id = make_point_id(chunk.doc_id, chunk.chunk_index)
             if chunk.chunk_id != deterministic_id:
                 chunk.chunk_id = deterministic_id
+            if chunk.chunk_id in seen_ids:
+                message = (
+                    f"Duplicate chunk id detected before upsert: {chunk.chunk_id}"
+                )
+                logger.error(message)
+                raise ValueError(message)
+            seen_ids.add(chunk.chunk_id)
 
         sample_chunk = changed_chunks[0]
         preview = sample_chunk.body_text.replace("\n", " ").strip()
@@ -663,6 +691,8 @@ class IngestService:
         validation_limit = max(1, self.settings.ingest.validation_sample_k)
         sample_texts = ["Статья 1", "договор", "наследство"]
         health_ok = False
+        alias_swapped = False
+        validation_passed = False
         if is_count_valid:
             health_ok = self.vector_store.health_probe(
                 target_collection,
@@ -673,6 +703,7 @@ class IngestService:
                 f"Health probe for {target_collection}: {health_ok}",
                 level=logging.INFO,
             )
+            validation_passed = health_ok
         else:
             logger.error(
                 "Validation count mismatch for %s (expected=%s actual=%s)",
@@ -680,6 +711,34 @@ class IngestService:
                 expected_chunks,
                 actual_chunks,
             )
+            try:
+                doc_actuals = self.vector_store.count_points_for_doc_ids(
+                    target_collection,
+                    list(doc_expected_counts.keys()),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Doc-level diagnostics failed for %s: %s",
+                    target_collection,
+                    exc,
+                )
+            else:
+                shortfalls: list[str] = []
+                for doc_id, expected_total in doc_expected_counts.items():
+                    actual_total = doc_actuals.get(doc_id, 0)
+                    if actual_total < expected_total:
+                        shortfalls.append(
+                            f"{doc_id}:{actual_total}/{expected_total}"
+                        )
+                if shortfalls:
+                    preview = ", ".join(shortfalls[:10])
+                    report(
+                        "Validation shortfall details (first {count}): {details}".format(
+                            count=min(len(shortfalls), 10),
+                            details=preview,
+                        ),
+                        level=logging.ERROR,
+                    )
 
         if is_count_valid and health_ok:
             if self.settings.ingest.dry_run:
@@ -697,6 +756,7 @@ class IngestService:
                     f"Alias swap OK → {alias} → {target_collection}",
                     level=logging.INFO,
                 )
+                alias_swapped = True
                 self._commit_pending_manifests(processed_documents)
                 self.vector_store.cleanup_old_collections(alias, keep_n=2)
         else:
@@ -711,6 +771,8 @@ class IngestService:
             files_processed=len(processed_documents),
             chunks_created=len(changed_chunks),
             skipped=skipped,
+            alias_swapped=alias_swapped,
+            validation_passed=validation_passed,
         )
 
     def _run_post_ingest_verification(

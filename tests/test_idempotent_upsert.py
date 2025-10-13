@@ -31,6 +31,7 @@ def test_reingest_same_chunks_keeps_point_count():
         body_vectors=body_vectors,
         embedding_model=service.settings.openai_models.embedding,
         skipped=0,
+        doc_expected_counts={chunk.doc_id: 1},
     )
 
     # Re-ingesting the same chunk should keep the point count stable
@@ -43,7 +44,9 @@ def test_reingest_same_chunks_keeps_point_count():
         body_vectors=body_vectors,
         embedding_model=service.settings.openai_models.embedding,
         skipped=0,
+        doc_expected_counts={chunk.doc_id: 1},
     )
 
-    staged_points = vector_store.points.get(vector_store.shadow_collection, set())
-    assert len(staged_points) == 1
+    staged_points = vector_store.points.get(vector_store.shadow_collection, {})
+    total_points = sum(len(ids) for ids in staged_points.values())
+    assert total_points == 1

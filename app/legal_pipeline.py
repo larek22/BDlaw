@@ -122,6 +122,7 @@ def make_chunk_id(
     chunk_sha: str | None = None,
     plan_version: str | None = None,
     parser_version: str | None = None,
+    article_no: str | None = None,
 ) -> str:
     """Generate a deterministic identifier for a chunk."""
 
@@ -133,6 +134,7 @@ def make_chunk_id(
         chunk_index,
         version=version_marker,
         chunk_sha=chunk_sha,
+        article_no=article_no,
     )
 
 
@@ -835,6 +837,7 @@ class LegalCorpusBuilder:
             chunk_sha=body_sha,
             plan_version=plan_version,
             parser_version=PARSER_VERSION,
+            article_no=article.hierarchy.article_no,
         )
         chunk_key = f"{article.doc_id}#c{chunk_index:04d}"
         source_path = article.source_relative_path or article.source_file_name

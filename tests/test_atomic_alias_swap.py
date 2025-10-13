@@ -20,6 +20,8 @@ def test_atomic_alias_not_swapped_on_validation_failure(monkeypatch):
     stats = run_atomic(service, vector_store, count_override=0, health_ok=True)
 
     assert stats.chunks_created == 1
+    assert stats.alias_swapped is False
+    assert stats.validation_passed is False
     assert vector_store.swapped is False
 
 
@@ -32,6 +34,8 @@ def test_atomic_alias_swapped_on_success(monkeypatch):
     stats = run_atomic(service, vector_store, count_override=1, health_ok=True)
 
     assert stats.chunks_created == 1
+    assert stats.alias_swapped is True
+    assert stats.validation_passed is True
     assert vector_store.swapped is True
     assert vector_store.cleaned is True
     assert vector_store.last_swap == (vector_store.alias_name, vector_store.shadow_collection)

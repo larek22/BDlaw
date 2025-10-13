@@ -79,13 +79,13 @@ class DummyVectorStore:
     def vector_size_for_model(self, model: str) -> int:
         return 3
 
-    def count_points(self) -> int:
+    def count_points(self, collection: str | None = None) -> int:
         return len(self.upserted)
 
     def count_points_with_prefix(self, prefix: str) -> int:
         return sum(1 for chunk in self.upserted if chunk.doc_id.startswith(prefix))
 
-    def count_points_for_doc_ids(self, doc_ids: Iterable[str]) -> Dict[str, int]:
+    def count_points_for_doc_ids(self, collection: str, doc_ids: Iterable[str]) -> Dict[str, int]:
         counts: Dict[str, int] = {doc_id: 0 for doc_id in doc_ids}
         for chunk in self.upserted:
             if chunk.doc_id in counts:
@@ -137,6 +137,7 @@ class DummyVectorStore:
 def test_ingest_writes_chunks_and_logs_progress(tmp_path: Path) -> None:
     settings = AppSettings()
     settings.openai_models.embedding = "dummy-embed"
+    settings.ingest.atomic_alias_swap = False
 
     repository = DataRepository(tmp_path / "data")
     service = IngestService(
@@ -175,7 +176,7 @@ def test_force_reingest_when_collection_empty(tmp_path: Path) -> None:
             super().__init__()
             self._count_calls = 0
 
-        def count_points(self) -> int:
+        def count_points(self, collection: str | None = None) -> int:
             self._count_calls += 1
             if self._count_calls == 1:
                 return 0
@@ -320,3 +321,5 @@ def test_atomic_flow_waits_for_async_counts(tmp_path: Path) -> None:
     assert vector_store.wait_calls
     assert vector_store.wait_calls[0][0] == vector_store._shadow_name
     assert vector_store.wait_calls[0][1] == 1
+    assert stats.alias_swapped is False
+    assert stats.validation_passed is True

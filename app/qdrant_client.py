@@ -608,10 +608,15 @@ class QdrantVectorStore:
                 )
             if expected_dim and len(body_vector) != expected_dim:
                 raise ValueError("Body vector dimension mismatch")
+            article_no: str | None = None
+            if isinstance(chunk.hierarchy, dict):
+                raw_article = chunk.hierarchy.get("article_no")
+                if raw_article is not None:
+                    article_no = str(raw_article)
             point_id = chunk.chunk_id or make_point_id(
                 chunk.doc_id,
                 chunk.chunk_index,
-                chunk_sha=chunk.chunk_sha256,
+                article_no=article_no,
             )
             try:
                 uuid.UUID(point_id)
@@ -1044,6 +1049,46 @@ class QdrantVectorStore:
         total = int(getattr(response, "count", 0))
         logger.info("Counted %d point(s) in collection %s", total, target)
         return total
+
+    def count_points_for_doc_ids(
+        self, collection: str, doc_ids: Sequence[str]
+    ) -> Dict[str, int]:
+        if not doc_ids:
+            return {}
+        unique_ids = []
+        seen: set[str] = set()
+        for doc_id in doc_ids:
+            if not doc_id:
+                continue
+            if doc_id in seen:
+                continue
+            seen.add(doc_id)
+            unique_ids.append(doc_id)
+        results: Dict[str, int] = {doc_id: 0 for doc_id in unique_ids}
+        for doc_id in unique_ids:
+            condition = rest.FieldCondition(
+                key="doc_id", match=rest.MatchValue(value=doc_id)
+            )
+            flt = rest.Filter(must=[condition])
+            try:
+                response = self._client.count(
+                    collection_name=collection,
+                    exact=True,
+                    filter=flt,
+                )
+            except Exception as exc:
+                if self._is_collection_missing_error(exc):
+                    results[doc_id] = 0
+                    continue
+                logger.warning(
+                    "Doc-level count failed for %s in %s: %s",
+                    doc_id,
+                    collection,
+                    exc,
+                )
+                continue
+            results[doc_id] = int(getattr(response, "count", 0))
+        return results
 
     def wait_for_count(self, collection: str, expected: int) -> int:
         if expected <= 0:

@@ -38,7 +38,7 @@ class FakeVectorStore:
         self.swapped = False
         self.cleaned = False
         self.upsert_calls: list[tuple[str, int]] = []
-        self.points: dict[str, set[str]] = {}
+        self.points: dict[str, dict[str, set[str]]] = {}
 
     def ensure_collection(self, embedding_model: str, recreate: bool = False) -> None:
         return None
@@ -53,14 +53,20 @@ class FakeVectorStore:
     def upsert_chunks(self, chunks, title_vectors, body_vectors, *, collection_name: str | None = None) -> None:
         target = collection_name or self.collection_name
         self.upsert_calls.append((target, len(chunks)))
-        bucket = self.points.setdefault(target, set())
+        bucket = self.points.setdefault(target, {})
         for chunk in chunks:
-            bucket.add(chunk.chunk_id)
+            bucket.setdefault(chunk.doc_id, set()).add(chunk.chunk_id)
 
-    def count_points(self, collection: str) -> int:
+    def count_points(self, collection: str | None = None) -> int:
         if self.count_override is not None:
             return self.count_override
-        return len(self.points.get(collection, set()))
+        target = collection or self.collection_name
+        bucket = self.points.get(target, {})
+        return sum(len(ids) for ids in bucket.values())
+
+    def count_points_for_doc_ids(self, collection: str, doc_ids) -> dict[str, int]:
+        bucket = self.points.get(collection or self.collection_name, {})
+        return {doc_id: len(bucket.get(doc_id, set())) for doc_id in doc_ids}
 
     def health_probe(self, collection: str, sample_texts: list[str], limit: int = 5) -> bool:
         return self.health_ok
@@ -140,6 +146,7 @@ def run_atomic(
         body_vectors={chunk.body_sha256: [0.1, 0.2, 0.3, 0.4]},
         embedding_model=service.settings.openai_models.embedding,
         skipped=0,
+        doc_expected_counts={chunk.doc_id: 1},
     )
 
 
