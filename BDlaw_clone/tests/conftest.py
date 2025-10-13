@@ -1,16 +1,6 @@
 import sys
-from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict
-
-_CLONE_DIR = Path(__file__).resolve().parents[1] / "BDlaw_clone"
-for path in list(sys.path):
-    if "BDlaw_clone" in path:
-        sys.path.remove(path)
-for module_name, module in list(sys.modules.items()):
-    module_file = getattr(module, "__file__", "")
-    if module_file and "BDlaw_clone" in module_file:
-        sys.modules.pop(module_name, None)
 
 
 def _install_stub_openai() -> None:
@@ -202,10 +192,9 @@ def _install_stub_qdrant_client() -> None:
             self.payload = payload
 
     class FieldCondition:
-        def __init__(self, key: str, match=None, range=None):
+        def __init__(self, key: str, match):
             self.key = key
             self.match = match
-            self.range = range
 
     class MatchValue:
         def __init__(self, value):
@@ -215,16 +204,10 @@ def _install_stub_qdrant_client() -> None:
         def __init__(self, text):
             self.text = text
 
-    class Range:
-        def __init__(self, *, gte=None, lte=None):
-            self.gte = gte
-            self.lte = lte
-
     class Filter:
-        def __init__(self, must=None, should=None, must_not=None):
+        def __init__(self, must=None, should=None):
             self.must = must or []
             self.should = should or []
-            self.must_not = must_not or []
 
     class FilterSelector:
         def __init__(self, filter: Filter):
@@ -259,7 +242,6 @@ def _install_stub_qdrant_client() -> None:
     models_module.MatchAny = MatchAny
     models_module.HnswConfigDiff = HnswConfigDiff
     models_module.OptimizersConfigDiff = OptimizersConfigDiff
-    models_module.Range = Range
 
     http_module.models = models_module
     module.http = http_module

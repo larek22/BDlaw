@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
@@ -192,107 +191,4 @@ __all__ = [
     "PlanLevel",
     "SplitConfig",
     "StructurePlanner",
-    "AutoStructurePlanner",
 ]
-
-
-class AutoStructurePlanner:
-    """
-    Uses heuristics + GPT-4.1 for legal hierarchy extraction.
-    """
-
-    JSON_SCHEMA = {
-        "type": "object",
-        "properties": {
-            "doc_id": {"type": "string"},
-            "hierarchy": {
-                "type": "object",
-                "properties": {
-                    "part_no": {"type": "integer"},
-                    "section_roman": {"type": "string"},
-                    "chapter_no": {"type": "integer"},
-                    "article_no": {"type": "string"},
-                    "article_no_int": {"type": "integer"},
-                },
-                "required": ["article_no", "article_no_int"],
-            },
-            "title_text": {"type": "string"},
-            "body_text": {"type": "string"},
-            "law_meta": {
-                "type": "object",
-                "properties": {
-                    "status": {"type": "string"},
-                    "enact_date_int": {"type": "integer"},
-                    "last_amend_date_int": {"type": "integer"},
-                    "date_from_int": {"type": "integer"},
-                    "date_to_int": {"type": "integer"},
-                },
-            },
-        },
-        "required": ["doc_id", "hierarchy", "title_text", "body_text"],
-    }
-
-    @staticmethod
-    def plan(
-        file_blob: bytes,
-        mime: str,
-        language: str = "ru",
-        hints: dict | None = None,
-    ) -> list[dict]:
-        """
-        1) Heuristic pre-parse (regex headings)
-        2) GPT-4.1 pass only for low-confidence segments
-        3) Validate & normalize fields (roman numerals, decimals: e.g., 783.1, 860.12)
-        4) Return list of ArticleRecord dicts (strict JSON per schema)
-        """
-
-        text = file_blob.decode("utf-8", errors="ignore")
-        if not text:
-            return []
-        doc_id = (hints or {}).get("doc_id") or "unknown"
-        article_pattern = re.compile(
-            r"(?im)^(?:статья|article)\s+(?P<num>\d+(?:\.\d+)?)(?P<title>[^\n]*)"
-        )
-        section_pattern = re.compile(r"(?im)^\s*раздел\s+(?P<section>[IVXLCDM]+)")
-        chapter_pattern = re.compile(r"(?im)^\s*глава\s+(?P<chapter>\d+)")
-        part_pattern = re.compile(r"(?im)^\s*часть\s+(?P<part>\d+)")
-        matches = list(article_pattern.finditer(text))
-        records: list[dict] = []
-        if not matches:
-            return records
-        boundaries = [match.start() for match in matches] + [len(text)]
-        for idx, match in enumerate(matches):
-            start = match.start()
-            end = boundaries[idx + 1]
-            body = text[start:end].strip()
-            heading = match.group("title").strip()
-            article_no = match.group("num").strip()
-            base = article_no.split(".", 1)[0]
-            try:
-                article_no_int = int(base)
-            except ValueError:
-                article_no_int = 0
-            window_start = max(0, text.rfind("\n", 0, start - 1))
-            window_text = text[window_start:start]
-            section_match = section_pattern.search(window_text)
-            chapter_match = chapter_pattern.search(window_text)
-            part_match = part_pattern.search(window_text)
-            hierarchy = {
-                "part_no": int(part_match.group("part")) if part_match else None,
-                "section_roman": (
-                    section_match.group("section") if section_match else None
-                ),
-                "chapter_no": int(chapter_match.group("chapter")) if chapter_match else None,
-                "article_no": article_no,
-                "article_no_int": article_no_int,
-            }
-            records.append(
-                {
-                    "doc_id": doc_id,
-                    "hierarchy": hierarchy,
-                    "title_text": heading or article_no,
-                    "body_text": body,
-                    "law_meta": hints.get("law_meta", {}) if hints else {},
-                }
-            )
-        return records

@@ -41,17 +41,6 @@ class DummyVectorStore:
     def combine_filters(self, *filters):  # pragma: no cover - deterministic stub
         return [flt for flt in filters if flt]
 
-    def build_law_filters(
-        self,
-        *,
-        as_of_date=None,
-        status=None,
-        part_no=None,
-        chapter_no=None,
-        article_no_int=None,
-    ):
-        return {"as_of_date": as_of_date, "status": status}
-
 
 class _Choice:
     def __init__(self, content: str):

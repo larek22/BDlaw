@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, List, Sequence
@@ -17,21 +16,12 @@ from .legal_pipeline import (
 from .legal_types import ChunkRecord
 from .settings import AppSettings
 from .qdrant_client import QdrantVectorStore
-from .loaders import load_docx, load_html, load_pdf, load_rtf, load_txt
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from .embeddings import EmbeddingClient
     from .readers.factory import DocumentReaderFactory
 
 logger = logging.getLogger(__name__)
-
-_POINT_NAMESPACE_URL = uuid.NAMESPACE_URL
-
-
-def make_point_id(doc_id: str, chunk_index: int) -> str:
-    """Return deterministic UUID for chunk placement."""
-
-    return str(uuid.uuid5(_POINT_NAMESPACE_URL, f"{doc_id}:{chunk_index}"))
 
 
 @dataclass
@@ -66,20 +56,6 @@ class IngestService:
             )
         self.reader_factory = reader_factory
         self.builder = LegalCorpusBuilder(self.repository, settings)
-
-    def _load_document(self, path: Path):
-        suffix = path.suffix.lower()
-        if suffix == ".pdf":
-            return load_pdf(path, self.reader_factory, self.settings)
-        if suffix in {".doc", ".docx"}:
-            return load_docx(path, self.reader_factory, self.settings)
-        if suffix in {".rtf"}:
-            return load_rtf(path, self.reader_factory, self.settings)
-        if suffix in {".htm", ".html"}:
-            return load_html(path, self.reader_factory, self.settings)
-        if suffix in {".txt"}:
-            return load_txt(path, self.reader_factory, self.settings)
-        return self.reader_factory.read(path)
 
     def ingest(
         self,
@@ -116,10 +92,7 @@ class IngestService:
 
         for path in paths:
             try:
-                if self.settings.ingest.enable_new_loaders:
-                    document = self._load_document(path)
-                else:
-                    document = self.reader_factory.read(path)
+                document = self.reader_factory.read(path)
             except Exception as exc:
                 message = f"Failed to read {path}: {exc}"
                 logger.error(message)
@@ -150,12 +123,6 @@ class IngestService:
                 )
             processed_documents.append(processed)
 
-        total_articles = sum(len(proc.articles) for proc in processed_documents)
-        total_chunks = sum(len(proc.chunks) for proc in processed_documents)
-        logger.info(
-            "Parsed %d articles, %d chunks", total_articles, total_chunks
-        )
-
         prefix_expected_counts: Dict[str, int] = {}
         doc_expected_counts: Dict[str, int] = {}
         changed_chunks: List[ChunkRecord] = []
@@ -173,7 +140,6 @@ class IngestService:
                     )
                 doc_expected_counts[chunk.doc_id] = doc_expected_counts.get(chunk.doc_id, 0) + 1
                 if chunk.doc_id in changed_set:
-                    chunk.chunk_id = make_point_id(chunk.doc_id, chunk.chunk_index)
                     changed_chunks.append(chunk)
 
         if not changed_chunks:
@@ -186,17 +152,11 @@ class IngestService:
         )
         self.vector_store.ensure_collection(embedding_model=embedding_model, recreate=recreate)
 
-        if self.settings.ingest.atomic_alias_swap:
-            report(
-                "Skipping destructive deletes prior to upsert (atomic alias swap enabled)",
-                level=logging.INFO,
-            )
-        elif changed_doc_ids:
+        if changed_doc_ids:
             report(
                 f"Deleting {len(changed_doc_ids)} document id(s) prior to upsert",
                 level=logging.INFO,
             )
-            # DEPRECATED: legacy destructive path retained for compatibility.
             self.vector_store.delete_documents(sorted(changed_doc_ids))
 
         self.embedding_client.reset_usage()
@@ -266,32 +226,18 @@ class IngestService:
                 level=logging.INFO,
             )
 
-        alias = self.vector_store.alias_name
-        expected_dim = self.vector_store.vector_size_for_model(embedding_model)
-        target_collection = None
-        if self.settings.ingest.atomic_alias_swap:
-            target_collection = self.vector_store.ensure_shadow_collection(
-                alias,
-                expected_dim,
-            )
-            logger.info(
-                "Atomic ingest target prepared: alias=%s shadow=%s", alias, target_collection
-            )
-
         try:
             self.vector_store.upsert_chunks(
                 changed_chunks,
                 title_vectors=title_vectors,
                 body_vectors=body_vectors,
-                collection_override=target_collection,
             )
         except Exception:
             logger.exception("Failed to upsert vectors to Qdrant")
             raise
 
         try:
-            validation_target = target_collection or self.vector_store.collection_name
-            total_points = self.vector_store.count_points(validation_target)
+            total_points = self.vector_store.count_points()
         except Exception:
             logger.warning("Unable to retrieve Qdrant point count after upsert")
         else:
@@ -309,38 +255,9 @@ class IngestService:
                         level=logging.INFO,
                     )
             report(
-                f"[QDRANT] collection '{validation_target}' at {self.vector_store.endpoint_url} ready with {total_points} point(s)",
+                f"[QDRANT] collection '{self.vector_store.collection_name}' at {self.vector_store.endpoint_url} ready with {total_points} point(s)",
                 level=logging.INFO,
             )
-
-        if self.settings.ingest.atomic_alias_swap:
-            expected_chunks = len(changed_chunks)
-            validation_collection = target_collection or self.vector_store.collection_name
-            actual_points = self.vector_store.count_points(validation_collection)
-            logger.info(
-                "Validation: expected=%d actual=%d", expected_chunks, actual_points
-            )
-            sample_texts = ["Статья 1", "договор", "наследство"]
-            healthy = self.vector_store.health_probe(
-                validation_collection,
-                sample_texts,
-                limit=max(1, self.settings.ingest.validation_sample_k),
-            )
-            if actual_points == expected_chunks and healthy:
-                if self.settings.ingest.dry_run:
-                    logger.info(
-                        "Dry run enabled; skipping alias swap for %s", validation_collection
-                    )
-                else:
-                    self.vector_store.swap_alias_atomically(alias, validation_collection)
-                    self.vector_store.cleanup_old_collections(alias, keep_n=2)
-            else:
-                logger.error(
-                    "Validation failed; alias not swapped (healthy=%s actual=%s expected=%s)",
-                    healthy,
-                    actual_points,
-                    expected_chunks,
-                )
 
         if changed_chunks and body_vectors:
             try:
