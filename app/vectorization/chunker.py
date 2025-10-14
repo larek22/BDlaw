@@ -255,7 +255,12 @@ def apply_plan(
             return
         token_usage += tokens
         if tokens > policy.max_tokens:
-            slices = _split_long_text(text, tokenizer, policy.max_tokens)
+            slices = _split_long_text(
+                text,
+                tokenizer,
+                policy.max_tokens,
+                policy.overlap_tokens,
+            )
             for slice_text in slices:
                 add_block_text(block, slice_text)
             return
@@ -372,16 +377,45 @@ def _record_payload_text(block: Block, policy: "RecordChunking") -> str:
     return block.text
 
 
-def _split_long_text(text: str, tokenizer: Tokenizer, max_tokens: int) -> List[str]:
+def _split_long_text(
+    text: str,
+    tokenizer: Tokenizer,
+    max_tokens: int,
+    overlap_tokens: int,
+) -> List[str]:
+    if not text:
+        return []
+    if max_tokens <= 0:
+        return [text]
+
     tokens = tokenizer.encode(text)
     if not tokens:
         return [text]
+
+    overlap = max(0, min(overlap_tokens, max_tokens - 1))
+    step = max(1, max_tokens - overlap)
+
     slices: List[str] = []
-    for start in range(0, len(tokens), max_tokens):
+    start = 0
+    while start < len(tokens):
         end = min(start + max_tokens, len(tokens))
         window = tokens[start:end]
-        slices.append(tokenizer.decode(window))
-    return [slice_text for slice_text in slices if slice_text] or [text]
+        if not window:
+            break
+        slice_text = tokenizer.decode(window)
+        # Guard against tokenizer decode/encode drift inflating token count
+        slice_tokens = tokenizer.encode(slice_text)
+        while len(slice_tokens) > max_tokens and len(window) > 1:
+            window = window[:-1]
+            slice_text = tokenizer.decode(window)
+            slice_tokens = tokenizer.encode(slice_text)
+        slices.append(slice_text)
+        if end >= len(tokens):
+            break
+        start += step
+
+    cleaned = [slice_text for slice_text in slices if slice_text]
+    return cleaned or [text]
 
 
 __all__ = ["Chunk", "ChunkerResult", "apply_plan"]

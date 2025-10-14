@@ -34,7 +34,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_PLANNER_MODELS: Tuple[str, ...] = ("gpt-4.1", "gpt-4o-mini")
+ALLOWED_PLANNER_MODELS: Tuple[str, ...] = ("gpt-4o-mini", "gpt-4.1")
 
 
 @dataclass(slots=True)
