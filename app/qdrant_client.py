@@ -46,27 +46,17 @@ class QdrantVectorStore:
 
         client_kwargs: dict[str, object] = {
             "url": url,
-            "timeout": settings.qdrant.timeout_seconds,
             "prefer_grpc": settings.qdrant.prefer_grpc,
         }
-        httpx_client: httpx.Client | None = None
         try:
             timeout = httpx.Timeout(
-                timeout=settings.qdrant.read_timeout_seconds,
-                connect=settings.qdrant.connect_timeout_seconds,
-                read=settings.qdrant.read_timeout_seconds,
-                write=settings.qdrant.write_timeout_seconds,
+                connect=float(settings.qdrant.connect_timeout_seconds),
+                read=float(settings.qdrant.read_timeout_seconds),
+                write=float(settings.qdrant.write_timeout_seconds),
             )
-            limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
-            httpx_client = httpx.Client(
-                timeout=timeout,
-                limits=limits,
-                http2=True,
-            )
-            client_kwargs["httpx_client"] = httpx_client
-        except AttributeError:
-            logger.warning("httpx.Timeout unavailable; using scalar timeout configuration")
-        self._httpx_client = httpx_client
+            client_kwargs["timeout"] = timeout
+        except Exception:  # pragma: no cover - defensive guard around timeout coercion
+            client_kwargs["timeout"] = float(settings.qdrant.timeout_seconds)
         if settings.qdrant.prefer_grpc:
             client_kwargs["grpc_port"] = settings.qdrant.grpc_port
 
@@ -79,25 +69,27 @@ class QdrantVectorStore:
         self._timeout = settings.qdrant.timeout_seconds
 
         self._api_key: Optional[str] = None
-        if url.startswith("https://"):
-            parsed_url = urlparse(url)
-            host = (parsed_url.hostname or "").lower()
-            if not api_key:
-                if host in {"localhost", "127.0.0.1", "::1"} or settings.qdrant.allow_insecure_https_without_api_key:
-                    logger.warning(
-                        "HTTPS endpoint %s missing API key; proceeding for local testing", url
-                    )
-                else:
-                    raise ValueError("Qdrant API key is required for HTTPS endpoints")
+        parsed_url = urlparse(url)
+        scheme = (parsed_url.scheme or "").lower()
+        host = (parsed_url.hostname or "").lower()
+        is_https = scheme == "https"
+        is_cloud = "qdrant.io" in host if host else False
+        if is_https and is_cloud and not api_key:
+            raise ValueError("Qdrant API key is required for Qdrant Cloud HTTPS endpoints")
+        if api_key:
+            client_kwargs["api_key"] = api_key
+            self._api_key = api_key
+        elif is_https and host not in {"localhost", "127.0.0.1", "::1"}:
+            if settings.qdrant.allow_insecure_https_without_api_key:
+                logger.warning(
+                    "HTTPS endpoint %s missing API key; continuing because allow_insecure_https_without_api_key is enabled",
+                    url,
+                )
             else:
-                client_kwargs["api_key"] = api_key
-                self._api_key = api_key
-        elif url.startswith("http://"):
-            if "localhost" not in url and "127.0.0.1" not in url and api_key:
-                client_kwargs["api_key"] = api_key
-                self._api_key = api_key
-        else:
-            raise ValueError(f"Unsupported Qdrant URL: {url}")
+                logger.info(
+                    "HTTPS endpoint %s missing API key; continuing without authentication for non-cloud host",
+                    url,
+                )
 
         logger.info(
             "Using Qdrant endpoint: %s (api_key=%s)",
@@ -105,24 +97,7 @@ class QdrantVectorStore:
             _mask_api_key(client_kwargs.get("api_key")),
         )
 
-        try:
-            self._client = QdrantClient(**client_kwargs)
-        except TypeError as exc:
-            if "httpx_client" in client_kwargs and "httpx_client" in str(exc):
-                logger.warning(
-                    "Qdrant client rejected custom httpx_client; retrying with scalar timeouts"
-                )
-                httpx_obj = client_kwargs.pop("httpx_client", None)
-                # ensure the bespoke client does not leak resources if unused
-                if httpx_obj is not None:
-                    try:
-                        httpx_obj.close()
-                    except Exception:  # pragma: no cover - best effort cleanup
-                        logger.debug("Failed to close unused httpx client", exc_info=True)
-                self._httpx_client = None
-                self._client = QdrantClient(**client_kwargs)
-            else:
-                raise
+        self._client = QdrantClient(**client_kwargs)
         self._server_version = self._fetch_server_version()
         logger.info(
             "Qdrant runtime: client=%s server=%s embedding_model=%s",
@@ -666,6 +641,36 @@ class QdrantVectorStore:
         if points:
             self._upsert_points_dynamic(target_collection, points)
 
+    def upsert_collection_plan(
+        self,
+        *,
+        collection: str,
+        plan_json: Dict[str, object],
+        plan_hash: str,
+        plan_source: str,
+        embedding_model: str | None = None,
+    ) -> None:
+        vector_dim = self.vector_size_for_model(embedding_model or self.settings.openai_models.embedding)
+        zero_dimension = max(1, int(vector_dim))
+        zero_vector = [0.0] * zero_dimension
+        payload = {
+            "meta_type": "collection_plan",
+            "collection": collection,
+            "plan_json": plan_json,
+            "plan_hash": plan_hash,
+            "plan_source": plan_source,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+        point = rest.PointStruct(
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"plan:{collection}")),
+            vector={
+                "title_vec": zero_vector,
+                "body_vec": zero_vector,
+            },
+            payload=payload,
+        )
+        self._upsert_points_dynamic(collection, [point])
+
     def _upsert_points_dynamic(
         self, collection: str, points: Sequence[rest.PointStruct]
     ) -> None:
@@ -922,28 +927,29 @@ class QdrantVectorStore:
     def _swap_alias(
         self, alias: str, new_collection: str, previous: Optional[str]
     ) -> bool:
-        operations: List[dict[str, dict[str, str]]] = [
-            {"create_alias": {"alias_name": alias, "collection_name": new_collection}}
-        ]
-        if previous and previous != new_collection:
-            operations.append(
-                {
-                    "delete_alias": {
-                        "alias_name": alias,
-                        "collection_name": previous,
-                    }
-                }
-            )
-
         try:
-            if hasattr(self._client, "update_aliases"):
-                self._client.update_aliases(
-                    change_aliases_operations=operations
-                )
+            recreate_alias = getattr(self._client, "recreate_alias", None)
+            if callable(recreate_alias):
+                recreate_alias(alias_name=alias, collection_name=new_collection)
             else:
-                self._client.update_collection_aliases(
-                    change_aliases_operations=operations
-                )
+                operations: List[rest.AliasOperations] = [
+                    rest.CreateAliasOperation(
+                        create_alias=rest.CreateAlias(
+                            alias_name=alias,
+                            collection_name=new_collection,
+                        )
+                    )
+                ]
+                if previous and previous != new_collection:
+                    operations.append(
+                        rest.DeleteAliasOperation(
+                            delete_alias=rest.DeleteAlias(
+                                alias_name=alias,
+                                collection_name=previous,
+                            )
+                        )
+                    )
+                self._client.update_aliases(changes=operations)
         except Exception as exc:
             logger.warning(
                 "Failed to update alias %s -> %s: %s. Using direct collection writes.",
@@ -951,55 +957,6 @@ class QdrantVectorStore:
                 new_collection,
                 exc,
             )
-            # DEPRECATED: earlier versions aborted here which left the alias
-            # pointing at the previous collection (or missing entirely). The
-            # fallback below mirrors the legacy REST helpers to keep aliases
-            # consistent even when the structured AliasOperations model is not
-            # accepted by the installed qdrant-client release.
-            create_alias = getattr(self._client, "create_alias", None)
-            delete_alias = getattr(self._client, "delete_alias", None)
-            if create_alias is not None:
-                try:
-                    if previous and previous != new_collection and delete_alias:
-                        delete_kwargs: dict[str, str] = {"alias_name": alias}
-                        try:
-                            delete_alias(**delete_kwargs)
-                        except TypeError:
-                            # Some client versions expect an explicit collection name.
-                            delete_kwargs["collection_name"] = previous
-                            delete_alias(**delete_kwargs)
-
-                    create_kwargs: dict[str, str] = {
-                        "alias_name": alias,
-                        "collection_name": new_collection,
-                    }
-                    try:
-                        create_alias(**create_kwargs)
-                    except TypeError:
-                        # Older clients sometimes reverse the keyword order.
-                        create_kwargs = {
-                            "collection_name": new_collection,
-                            "alias_name": alias,
-                        }
-                        create_alias(**create_kwargs)
-                except Exception as alias_exc:  # pragma: no cover - network/client specific
-                    logger.error(
-                        "Alias management fallback failed for %s -> %s: %s",
-                        alias,
-                        new_collection,
-                        alias_exc,
-                    )
-                    self._write_collection_name = new_collection
-                    return False
-                else:
-                    logger.info(
-                        "Alias %s now points to collection %s via legacy fallback",
-                        alias,
-                        new_collection,
-                    )
-                    self._write_collection_name = self._alias_name
-                    return True
-
             self._write_collection_name = new_collection
             return False
 

@@ -5,12 +5,14 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, cast
+from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QThread, Signal, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -35,6 +37,9 @@ from ..logging_config import configure_logging
 from ..query_pipeline import QueryPipeline
 from ..qdrant_client import QdrantVectorStore
 from ..settings import AppSettings
+from ..vectorization.models import DistanceMetric, VectorizationPlan
+from ..vectorization.service import VectorizationService
+from .vectorization_plan_dialog import VectorizationPlanDialog
 
 logger = logging.getLogger(__name__)
 
@@ -44,17 +49,25 @@ class IngestWorker(QObject):
     error = Signal(str)
     progress = Signal(str)
 
-    def __init__(self, service: IngestService, paths: Sequence[Path], recreate: bool) -> None:
+    def __init__(
+        self,
+        service: IngestService,
+        paths: Sequence[Path],
+        recreate: bool,
+        approved_plans: dict[Path, VectorizationPlan] | None = None,
+    ) -> None:
         super().__init__()
         self.service = service
         self.paths = paths
         self.recreate = recreate
+        self.approved_plans = approved_plans or {}
 
     def run(self) -> None:  # pragma: no cover - requires Qt thread
         try:
             stats = self.service.ingest(
                 self.paths,
                 recreate=self.recreate,
+                approved_plans=self.approved_plans,
                 progress_cb=self.progress.emit,
             )
             self.finished.emit(
@@ -197,6 +210,7 @@ class SettingsTab(QWidget):
 class IngestTab(QWidget):
     start_ingest = Signal(list, bool)
     reset_requested = Signal()
+    plan_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -209,6 +223,11 @@ class IngestTab(QWidget):
         self.add_files_button = QPushButton("Add Files...")
         self.add_files_button.clicked.connect(self._open_file_dialog)
         button_row.addWidget(self.add_files_button)
+
+        self.plan_button = QPushButton("Analyze (GPT Plan)")
+        self.plan_button.clicked.connect(self._emit_plan)
+        self.plan_button.setEnabled(False)
+        button_row.addWidget(self.plan_button)
 
         self.clear_button = QPushButton("Clear")
         self.clear_button.clicked.connect(self.clear_files)
@@ -260,6 +279,7 @@ class IngestTab(QWidget):
 
     def _update_button_state(self) -> None:
         self.ingest_button.setEnabled(self.file_list.count() > 0)
+        self.plan_button.setEnabled(self.file_list.count() > 0)
 
     def clear_files(self) -> None:
         self.file_list.clear()
@@ -272,6 +292,7 @@ class IngestTab(QWidget):
 
     def set_running(self, running: bool) -> None:
         self.add_files_button.setEnabled(not running)
+        self.plan_button.setEnabled((not running) and self.file_list.count() > 0)
         self.clear_button.setEnabled(not running)
         self.reset_button.setEnabled(not running)
         self.ingest_button.setEnabled((not running) and self.file_list.count() > 0)
@@ -285,6 +306,18 @@ class IngestTab(QWidget):
 
     def _emit_reset(self) -> None:
         self.reset_requested.emit()
+
+    def _emit_plan(self) -> None:
+        if self.file_list.count() == 0:
+            QMessageBox.warning(self, "Analyze", "Please add a file first")
+            return
+        item = self.file_list.currentItem()
+        if item is None:
+            item = self.file_list.item(0)
+        if item is None:
+            QMessageBox.warning(self, "Analyze", "No file selected")
+            return
+        self.plan_requested.emit(item.text())
 
 
 class QueryTab(QWidget):
@@ -367,6 +400,8 @@ class MainWindow(QMainWindow):
         self.vector_store: QdrantVectorStore | None = None
         self.ingest_service: IngestService | None = None
         self.query_pipeline: QueryPipeline | None = None
+        self.vectorization_service: VectorizationService | None = None
+        self._approved_plans: dict[Path, VectorizationPlan] = {}
         self._ingest_thread: QThread | None = None
         self._ingest_worker: IngestWorker | None = None
         self._query_thread: QThread | None = None
@@ -395,17 +430,46 @@ class MainWindow(QMainWindow):
 
         self.ingest_tab.start_ingest.connect(self._start_ingest)
         self.ingest_tab.reset_requested.connect(self._reset_collection)
+        self.ingest_tab.plan_requested.connect(self._analyze_plan)
         self.query_tab.start_query.connect(self._start_query)
 
     def _init_services(self) -> None:
+        self.embedding_client = None
+        self.vector_store = None
+        self.ingest_service = None
+        self.query_pipeline = None
+        self.vectorization_service = None
+
         try:
-            self.embedding_client = EmbeddingClient(self.settings)
-            self.vector_store = QdrantVectorStore(self.settings)
-            self.ingest_service = IngestService(self.settings, self.embedding_client, self.vector_store)
-            self.query_pipeline = QueryPipeline(self.settings, self.embedding_client, self.vector_store)
+            qdrant_url = (self.settings.qdrant.url or "").strip()
+            parsed = urlparse(qdrant_url) if qdrant_url else None
+            host = (parsed.hostname or "").lower() if parsed else ""
+            scheme = (parsed.scheme or "").lower() if parsed else ""
+            api_key = (self.settings.qdrant.api_key or "").strip()
+            if scheme == "https" and host.endswith("qdrant.io") and not api_key:
+                QMessageBox.warning(
+                    self,
+                    "Qdrant",
+                    "Qdrant API key is required for Qdrant Cloud endpoints. "
+                    "Please enter it on the Settings tab before continuing.",
+                )
+                return
+
+            embedding_client = EmbeddingClient(self.settings)
+            vector_store = QdrantVectorStore(self.settings)
+            ingest_service = IngestService(self.settings, embedding_client, vector_store)
+            query_pipeline = QueryPipeline(self.settings, embedding_client, vector_store)
+            vectorization_service = VectorizationService()
         except Exception as exc:
             QMessageBox.critical(self, "Initialization error", str(exc))
             logger.exception("Failed to initialize services")
+            return
+
+        self.embedding_client = embedding_client
+        self.vector_store = vector_store
+        self.ingest_service = ingest_service
+        self.query_pipeline = query_pipeline
+        self.vectorization_service = vectorization_service
 
     def _test_openai(self) -> None:
         try:
@@ -485,17 +549,65 @@ class MainWindow(QMainWindow):
                 self.ingest_tab.append_log(message)
             QMessageBox.information(self, "Reset DB", message)
 
+    def _analyze_plan(self, path: str) -> None:
+        path_obj = Path(path).resolve()
+        if not path_obj.exists():
+            QMessageBox.critical(self, "Analyze", f"File not found: {path_obj}")
+            return
+        if self.vectorization_service is None:
+            self.vectorization_service = VectorizationService()
+        service = self.vectorization_service
+        distance_raw = getattr(self.settings.qdrant, "distance", "cosine")
+        distance: DistanceMetric
+        if distance_raw in ("cosine", "dot", "euclid"):
+            distance = cast(DistanceMetric, distance_raw)
+        else:
+            distance = cast(DistanceMetric, "cosine")
+        chat_model = self.settings.openai_models.chat if self.settings.openai_api_key else None
+        try:
+            artifacts = service.analyze(
+                path=path_obj,
+                collection_name=self.settings.qdrant.collection,
+                embedding_model=self.settings.openai_models.embedding,
+                distance=distance,
+                hard_cap=self.settings.chunking.max_tokens,
+                chat_model=chat_model,
+                api_key=self.settings.openai_api_key,
+            )
+        except Exception as exc:
+            logger.exception("Vectorization plan analysis failed")
+            QMessageBox.critical(self, "Analyze", f"Plan generation failed: {exc}")
+            return
+        dialog = VectorizationPlanDialog(artifacts.preview, self)
+        result = dialog.exec()
+        if result == QDialog.Accepted:
+            selected_plan = dialog.plan()
+            self._approved_plans[path_obj] = selected_plan
+            self.ingest_tab.append_log(f"Plan approved for {path_obj.name}")
+        else:
+            self.ingest_tab.append_log(f"Plan cancelled for {path_obj.name}")
+
     def _start_ingest(self, paths: Sequence[str], recreate: bool) -> None:
         if not paths:
             return
         if not self.ingest_service:
             QMessageBox.critical(self, "Ingest", "Services not initialized")
             return
-        file_paths = [Path(p) for p in paths]
+        file_paths = [Path(p).resolve() for p in paths]
+        for path_obj in file_paths:
+            if path_obj in self._approved_plans:
+                self.ingest_tab.append_log(f"Using approved plan for {path_obj.name}")
+            else:
+                self.ingest_tab.append_log(f"No approved plan for {path_obj.name}; fallback will be used")
         self.ingest_tab.set_running(True)
         self.ingest_tab.append_log("Starting ingestion...")
         self._cleanup_worker("_ingest_thread", "_ingest_worker")
-        worker = IngestWorker(self.ingest_service, file_paths, recreate)
+        worker = IngestWorker(
+            self.ingest_service,
+            file_paths,
+            recreate,
+            approved_plans=self._approved_plans.copy(),
+        )
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)

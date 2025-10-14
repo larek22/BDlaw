@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover - optional dependency not installed
     OpenAI = None  # type: ignore
 
 from .data_repository import DataRepository
+from .llm_utils import LLM_MODEL_CANDIDATES
 from .settings import AppSettings
 
 logger = logging.getLogger(__name__)
@@ -331,19 +332,73 @@ class IngestionRouter:
             "headings": headings,
             "sample_text": sample,
         }
-        response = self._client.responses.create(
-            model=router_settings.model,
-            input=json.dumps(payload, ensure_ascii=False),
-            functions=[_ROUTER_FUNCTION_SPEC],
-            function_call={"name": "propose_ingestion_plan"},
-        )
-        choice = response.output[0]
-        if getattr(choice, "type", "") != "function_call":
-            raise RuntimeError("Router response missing function call result")
-        arguments = getattr(choice, "function_call", {}).get("arguments")
-        if not arguments:
-            raise RuntimeError("Router response missing arguments")
-        return json.loads(arguments)
+        candidates: list[str] = []
+        preferred = getattr(router_settings, "model", None)
+        if preferred:
+            candidates.append(preferred)
+        for model in LLM_MODEL_CANDIDATES:
+            if model not in candidates:
+                candidates.append(model)
+
+        last_err: Exception | None = None
+        for model in candidates:
+            if hasattr(self._client, "responses"):
+                try:
+                    response = self._client.responses.create(
+                        model=model,
+                        input=json.dumps(payload, ensure_ascii=False),
+                        functions=[_ROUTER_FUNCTION_SPEC],
+                        function_call={"name": "propose_ingestion_plan"},
+                        temperature=0,
+                    )
+                    choice = response.output[0]
+                    if getattr(choice, "type", "") != "function_call":
+                        raise RuntimeError("Router response missing function call result")
+                    arguments = getattr(choice, "function_call", {}).get("arguments")
+                    if not arguments:
+                        raise RuntimeError("Router response missing arguments")
+                    logger.info("Router success via Responses API with model %s", model)
+                    return json.loads(arguments)
+                except Exception as exc:
+                    logger.warning("Router Responses failed for %s: %r", model, exc)
+                    last_err = exc
+
+            chat_api = getattr(getattr(self._client, "chat", None), "completions", None)
+            if chat_api is None:
+                continue
+            try:
+                response = chat_api.create(
+                    model=model,
+                    temperature=0,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are an ingestion router that selects the best chunking plan. "
+                                "Use the provided function to return a JSON plan."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": json.dumps(payload, ensure_ascii=False),
+                        },
+                    ],
+                    functions=[_ROUTER_FUNCTION_SPEC],
+                    function_call={"name": "propose_ingestion_plan"},
+                )
+                message = response.choices[0].message  # type: ignore[index]
+                arguments = getattr(message, "function_call", {}).get("arguments")
+                if not arguments:
+                    raise RuntimeError("Router chat response missing arguments")
+                logger.info("Router success via Chat Completions with model %s", model)
+                return json.loads(arguments)
+            except Exception as exc:
+                logger.warning("Router Chat failed for %s: %r", model, exc)
+                last_err = exc
+
+        if last_err is None:
+            last_err = RuntimeError("router models unavailable")
+        raise RuntimeError(f"Router response generation failed: {last_err}")
 
 
 def build_sniff_info(path: Path, pages: Iterable[str], *, mime_type: str | None = None) -> RouterSniffInfo:

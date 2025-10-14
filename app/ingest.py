@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Dict, List, Sequence
+from typing import TYPE_CHECKING, Callable, Dict, List, Mapping, Sequence
 
 from .data_repository import DataRepository
 from .id_utils import make_point_id as _shared_make_point_id
@@ -18,6 +20,11 @@ from .legal_pipeline import (
 from .legal_types import ChunkRecord
 from .settings import AppSettings
 from .qdrant_client import QdrantVectorStore
+from .vectorization.chunker import apply_plan as apply_vector_plan
+from .vectorization.models import VectorizationPlan
+from .vectorization.normalizer import normalize_document
+from .vectorization.service import filter_blocks_for_plan
+from .vectorization.tokenization import DEFAULT_TOKENIZER
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from .embeddings import EmbeddingClient
@@ -27,12 +34,21 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
 logger = logging.getLogger(__name__)
 
 
-def make_point_id(doc_id: str, chunk_index: int) -> str:
-    """Deterministic point ids derived from document id and chunk index."""
+def make_point_id(
+    doc_id: str,
+    chunk_index: int,
+    *,
+    article_no: str | None = None,
+    version: str | None = None,
+) -> str:
+    """Deterministic point ids derived from document coordinates."""
 
-    # DEPRECATED: direct uuid.uuid5(NAMESPACE_URL, f"{doc_id}:{chunk_index}") implementation
-    # retained for reference. The shared helper now centralises ID generation.
-    return _shared_make_point_id(doc_id, chunk_index)
+    return _shared_make_point_id(
+        doc_id,
+        chunk_index,
+        version=version,
+        article_no=article_no,
+    )
 
 
 def expected_chunk_id(chunk: ChunkRecord) -> str:
@@ -92,6 +108,48 @@ class IngestService:
         if self.settings.ingest.enable_new_loaders:
             self._loader_map = self._build_loader_map()
 
+    def ingest(
+        self,
+        paths: Sequence[Path],
+        recreate: bool = False,
+        *,
+        approved_plans: Mapping[Path, VectorizationPlan] | None = None,
+        progress_cb: Callable[[str], None] | None = None,
+    ) -> IngestStats:
+        resolved_plans: Dict[Path, VectorizationPlan] = {}
+        if approved_plans:
+            for plan_path, plan in approved_plans.items():
+                resolved_plans[plan_path.resolve()] = plan
+        normalised_paths = [path.resolve() for path in paths]
+        plan_paths = [path for path in normalised_paths if path in resolved_plans]
+        legacy_paths = [path for path in normalised_paths if path not in resolved_plans]
+
+        stats_legacy = IngestStats(files_processed=0, chunks_created=0, skipped=0)
+        stats_plan = IngestStats(files_processed=0, chunks_created=0, skipped=0)
+
+        if legacy_paths:
+            stats_legacy = self._ingest_legacy(
+                legacy_paths,
+                recreate=recreate,
+                progress_cb=progress_cb,
+            )
+            recreate = False
+        if plan_paths:
+            stats_plan = self._ingest_with_approved_plans(
+                plan_paths,
+                resolved_plans,
+                recreate=recreate,
+                progress_cb=progress_cb,
+            )
+
+        return IngestStats(
+            files_processed=stats_legacy.files_processed + stats_plan.files_processed,
+            chunks_created=stats_legacy.chunks_created + stats_plan.chunks_created,
+            skipped=stats_legacy.skipped + stats_plan.skipped,
+            alias_swapped=stats_legacy.alias_swapped or stats_plan.alias_swapped,
+            validation_passed=stats_legacy.validation_passed or stats_plan.validation_passed,
+        )
+
     def _commit_pending_manifests(
         self, processed_documents: Sequence[ProcessedDocument]
     ) -> None:
@@ -136,7 +194,214 @@ class IngestService:
             else:
                 logger.info("Removed stale pending manifest %s", pending)
 
-    def ingest(
+    def _ingest_with_approved_plans(
+        self,
+        paths: Sequence[Path],
+        plan_lookup: Mapping[Path, VectorizationPlan],
+        *,
+        recreate: bool,
+        progress_cb: Callable[[str], None] | None,
+    ) -> IngestStats:
+        def report(message: str, *, level: int = logging.INFO) -> None:
+            logger.log(level, message)
+            if progress_cb:
+                progress_cb(message)
+
+        if not paths:
+            return IngestStats(files_processed=0, chunks_created=0, skipped=0)
+
+        embedding_model = self.settings.openai_models.embedding
+        report(
+            f"Applying {len(paths)} approved plan(s) using embedding model {embedding_model}",
+            level=logging.INFO,
+        )
+        self.vector_store.ensure_collection(embedding_model=embedding_model, recreate=recreate)
+
+        files_processed = 0
+        chunks_created = 0
+        skipped = 0
+
+        for path in paths:
+            plan = plan_lookup.get(path)
+            if plan is None:
+                report(
+                    f"No approved plan found for {path.name}; skipping",
+                    level=logging.WARNING,
+                )
+                skipped += 1
+                continue
+            if plan.embedding_model and plan.embedding_model != embedding_model:
+                report(
+                    f"Plan embedding model {plan.embedding_model} differs from configured {embedding_model}; using configured model",
+                    level=logging.WARNING,
+                )
+
+            report(
+                f"Applying approved plan (source={plan.plan_source}) for {path.name}",
+                level=logging.INFO,
+            )
+            try:
+                blocks = normalize_document(path)
+            except Exception as exc:
+                message = f"Failed to normalize {path}: {exc}"
+                logger.error(message)
+                if progress_cb:
+                    progress_cb(message)
+                skipped += 1
+                continue
+
+            filtered_blocks = filter_blocks_for_plan(blocks, plan)
+            chunk_result = apply_vector_plan(
+                filtered_blocks, plan, tokenizer=DEFAULT_TOKENIZER
+            )
+            if not chunk_result.chunks:
+                report(
+                    f"Plan produced no chunks for {path.name}; skipping",
+                    level=logging.WARNING,
+                )
+                skipped += 1
+                continue
+            overage = [
+                chunk for chunk in chunk_result.chunks
+                if chunk.tokens > plan.chunking_policy.max_tokens
+            ]
+            if overage:
+                report(
+                    f"Plan for {path.name} produced chunk exceeding max tokens ({overage[0].tokens}>{plan.chunking_policy.max_tokens}); skipping",
+                    level=logging.ERROR,
+                )
+                skipped += 1
+                continue
+
+            plan_payload = plan.model_dump()
+            plan_hash = hashlib.sha256(
+                json.dumps(plan_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+
+            manifest_dir = Path("data") / "manifests" / self.vector_store.collection_name
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            manifest_path = manifest_dir / f"{path.stem}.plan.json"
+            try:
+                manifest_path.write_text(
+                    json.dumps(plan_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                report(
+                    f"Failed to persist plan manifest for {path.name}: {exc}",
+                    level=logging.WARNING,
+                )
+
+            chunk_records: List[ChunkRecord] = []
+            title_texts: List[str] = []
+            title_shas: List[str] = []
+            body_texts: List[str] = []
+            body_shas: List[str] = []
+
+            for index, chunk in enumerate(chunk_result.chunks):
+                doc_id = str(chunk.meta.get("doc_id") or path.stem or "document").strip()
+                if not doc_id:
+                    doc_id = path.stem or "document"
+                doc_id = doc_id[:512]
+                text_body = chunk.text
+                title_text = str(chunk.meta.get("title_text") or "").strip()
+                if not title_text and text_body:
+                    title_text = text_body.splitlines()[0].strip()
+                if not title_text:
+                    title_text = f"{doc_id} chunk {index + 1}"
+                title_text = title_text[:512]
+
+                hierarchy_meta: Dict[str, object] = {}
+                if isinstance(chunk.meta.get("hierarchy"), dict):
+                    for key, value in chunk.meta["hierarchy"].items():
+                        if value is not None:
+                            hierarchy_meta[key] = value
+                for field in plan.hierarchy_rules.path_fields:
+                    value = chunk.meta.get(field)
+                    if value is not None:
+                        hierarchy_meta.setdefault(field, value)
+
+                row_index = chunk.meta.get("row_index")
+                if row_index is not None:
+                    hierarchy_meta.setdefault("row_index", row_index)
+
+                body_sha = hashlib.sha256(text_body.encode("utf-8")).hexdigest()
+                title_sha = hashlib.sha256(title_text.encode("utf-8")).hexdigest()
+                article_no = hierarchy_meta.get("article")
+                article_str = str(article_no) if article_no is not None else None
+
+                record = ChunkRecord(
+                    doc_id=doc_id,
+                    chunk_index=index,
+                    chunk_id=make_point_id(doc_id, index, article_no=article_str),
+                    title_text=title_text,
+                    body_text=text_body,
+                    hierarchy=hierarchy_meta,
+                    law_meta={
+                        "plan_hash": plan_hash,
+                        "plan_source": plan.plan_source,
+                    },
+                    source={
+                        "path": str(path),
+                        "plan_hash": plan_hash,
+                        "plan_source": plan.plan_source,
+                        "plan_chunk_id": chunk.meta.get("plan_chunk_id", chunk.chunk_id),
+                        "row_index": row_index,
+                    },
+                    chunk_sha256=body_sha,
+                    title_sha256=title_sha,
+                    body_sha256=body_sha,
+                )
+                chunk_records.append(record)
+                title_texts.append(title_text)
+                title_shas.append(title_sha)
+                body_texts.append(text_body)
+                body_shas.append(body_sha)
+
+            report(
+                f"Embedding {len(chunk_records)} chunk(s) for {path.name}",
+                level=logging.INFO,
+            )
+
+            title_embeddings = self.embedding_client.embed_texts(title_texts, title_shas)
+            body_embeddings = self.embedding_client.embed_texts(body_texts, body_shas)
+            title_vectors = {item.sha: item.vector for item in title_embeddings}
+            body_vectors = {item.sha: item.vector for item in body_embeddings}
+
+            preview = chunk_records[0].body_text.replace("\n", " ").strip()
+            if len(preview) > 120:
+                preview = preview[:117] + "..."
+            report(
+                f"Plan sample: doc={chunk_records[0].doc_id} index=0 sha={chunk_records[0].chunk_sha256[:12]} preview='{preview}'",
+                level=logging.INFO,
+            )
+
+            self.vector_store.upsert_chunks(
+                chunk_records,
+                title_vectors=title_vectors,
+                body_vectors=body_vectors,
+            )
+
+            self.vector_store.upsert_collection_plan(
+                collection=self.vector_store.collection_name,
+                plan_json=plan_payload,
+                plan_hash=plan_hash,
+                plan_source=plan.plan_source,
+                embedding_model=embedding_model,
+            )
+
+            files_processed += 1
+            chunks_created += len(chunk_records)
+
+        return IngestStats(
+            files_processed=files_processed,
+            chunks_created=chunks_created,
+            skipped=skipped,
+            alias_swapped=False,
+            validation_passed=False,
+        )
+
+    def _ingest_legacy(
         self,
         paths: Sequence[Path],
         recreate: bool = False,
