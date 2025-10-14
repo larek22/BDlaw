@@ -107,19 +107,21 @@ def _normalize_plan_dict(
             fields[key] = "string" if value is None else str(value)
     for key, dtype in DEFAULT_PAYLOAD_FIELDS.items():
         fields.setdefault(key, dtype)
-    payload_schema["fields"] = fields
-    cloned["payload_schema"] = payload_schema
+    payload_schema_clean: Dict[str, object] = {"fields": fields}
+    cloned["payload_schema"] = payload_schema_clean
 
     id_strategy = cloned.get("id_strategy")
     if not isinstance(id_strategy, dict):
         id_strategy = {}
     pattern = id_strategy.get("pattern")
     if not isinstance(pattern, str) or not pattern.strip():
-        id_strategy["pattern"] = "auto:{start}-{end}:{index}"
-    id_strategy["ensure_uuid_if_missing"] = bool(
-        id_strategy.get("ensure_uuid_if_missing", True)
-    )
-    cloned["id_strategy"] = id_strategy
+        pattern = "auto:{start}-{end}:{index}"
+    ensure_uuid = bool(id_strategy.get("ensure_uuid_if_missing", True))
+    id_strategy_clean = {
+        "pattern": pattern,
+        "ensure_uuid_if_missing": ensure_uuid,
+    }
+    cloned["id_strategy"] = id_strategy_clean
 
     policy = cloned.get("chunking_policy")
     if not isinstance(policy, dict):
@@ -138,7 +140,6 @@ def _normalize_plan_dict(
     if looks_russian:
         max_tokens_int = min(max_tokens_int, 900)
     max_tokens_int = max(1, min(max_tokens_int, context.hard_cap))
-    policy["max_tokens"] = max_tokens_int
     overlap = policy.get("overlap_tokens", 120)
     try:
         overlap_int = int(overlap)
@@ -146,7 +147,7 @@ def _normalize_plan_dict(
         overlap_int = 120
     if overlap_int >= max_tokens_int:
         overlap_int = max(0, min(120, max_tokens_int - 1))
-    policy["overlap_tokens"] = max(0, overlap_int)
+    overlap_int = max(0, overlap_int)
     split_on = policy.get("split_on_headings")
     if isinstance(split_on, (tuple, set)):
         split_on = list(split_on)
@@ -158,11 +159,44 @@ def _normalize_plan_dict(
         split_on = []
     if looks_russian:
         split_on = ["article"]
-    policy["split_on_headings"] = split_on
-    policy.setdefault("keep_lists_intact", True)
-    policy.setdefault("keep_tables_intact", True)
-    policy.setdefault("merge_short_paragraphs_under_tokens", 80)
-    cloned["chunking_policy"] = policy
+    merge_short = policy.get("merge_short_paragraphs_under_tokens", 80)
+    try:
+        merge_short_int = int(merge_short)
+    except (TypeError, ValueError):
+        merge_short_int = 80
+    keep_lists = bool(policy.get("keep_lists_intact", True))
+    keep_tables = bool(policy.get("keep_tables_intact", True))
+
+    record_policy_raw = policy.get("record_chunking")
+    record_policy: Dict[str, object] = {}
+    if isinstance(record_policy_raw, dict):
+        primary_key = record_policy_raw.get("primary_key")
+        if primary_key is not None:
+            record_policy["primary_key"] = str(primary_key) if primary_key else None
+        include = record_policy_raw.get("fields_include")
+        if isinstance(include, list):
+            record_policy["fields_include"] = [str(item) for item in include if str(item)]
+        exclude = record_policy_raw.get("fields_exclude")
+        if isinstance(exclude, list):
+            record_policy["fields_exclude"] = [str(item) for item in exclude if str(item)]
+        records_per_chunk = record_policy_raw.get("records_per_chunk")
+        try:
+            record_policy["records_per_chunk"] = max(1, int(records_per_chunk))
+        except (TypeError, ValueError):
+            pass
+
+    policy_clean: Dict[str, object] = {
+        "mode": policy["mode"],
+        "max_tokens": max_tokens_int,
+        "overlap_tokens": overlap_int,
+        "split_on_headings": split_on,
+        "keep_lists_intact": keep_lists,
+        "keep_tables_intact": keep_tables,
+        "merge_short_paragraphs_under_tokens": merge_short_int,
+    }
+    if record_policy:
+        policy_clean["record_chunking"] = record_policy
+    cloned["chunking_policy"] = policy_clean
 
     hierarchy = cloned.get("hierarchy_rules")
     if not isinstance(hierarchy, dict):
@@ -170,6 +204,12 @@ def _normalize_plan_dict(
     heading_regex = hierarchy.get("heading_regex")
     if not isinstance(heading_regex, dict):
         heading_regex = {}
+    else:
+        heading_regex = {
+            str(key): str(value)
+            for key, value in heading_regex.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
     if looks_russian:
         heading_regex.setdefault(
             "section", r"(?im)^\s*Раздел\s+([IVXLC]+|\d+)\b"
@@ -192,8 +232,31 @@ def _normalize_plan_dict(
             hierarchy.get("path_fields")
             or ["corpus", "section", "part", "chapter", "article", "version"],
         )
-    hierarchy["heading_regex"] = heading_regex
-    cloned["hierarchy_rules"] = hierarchy
+    path_fields = hierarchy.get("path_fields")
+    if isinstance(path_fields, list):
+        path_fields_list = [str(item) for item in path_fields if str(item)]
+    else:
+        path_fields_list = hierarchy.get("path_fields") or [
+            "corpus",
+            "section",
+            "part",
+            "chapter",
+            "article",
+            "version",
+        ]
+    if looks_russian:
+        path_fields_list = ["section", "part", "chapter", "article", "version_date"]
+    hierarchy_clean: Dict[str, object] = {
+        "heading_regex": heading_regex,
+        "path_fields": path_fields_list,
+    }
+    version_regex = hierarchy.get("version_regex")
+    if version_regex is not None:
+        if isinstance(version_regex, str):
+            hierarchy_clean["version_regex"] = version_regex
+    elif looks_russian:
+        hierarchy_clean["version_regex"] = r"(?im)от\s+(\d{2}\.\d{2}\.\d{4})"
+    cloned["hierarchy_rules"] = hierarchy_clean
 
     preamble = cloned.get("preamble_rules")
     if not isinstance(preamble, dict):
@@ -217,31 +280,43 @@ def _normalize_plan_dict(
         ]:
             if pattern not in exclude_list:
                 exclude_list.append(pattern)
-    preamble["exclude_regexes"] = exclude_list
+    preamble_clean: Dict[str, object] = {
+        "drop_before_first_heading": preamble.get("drop_before_first_heading"),
+        "exclude_regexes": exclude_list,
+    }
     max_frontmatter = preamble.get("max_frontmatter_chars", 8000)
     try:
         max_frontmatter_int = int(max_frontmatter)
     except (TypeError, ValueError):
         max_frontmatter_int = 8000
-    preamble["max_frontmatter_chars"] = max(0, max_frontmatter_int)
-    cloned["preamble_rules"] = preamble
+    preamble_clean["max_frontmatter_chars"] = max(0, max_frontmatter_int)
+    if looks_russian:
+        preamble_clean["drop_before_first_heading"] = "article"
+    cloned["preamble_rules"] = preamble_clean
 
     quality = cloned.get("quality_checks")
     if not isinstance(quality, dict):
         quality = {}
-    quality["min_chunks"] = int(quality.get("min_chunks", 1)) or 1
+    min_chunks = quality.get("min_chunks", 1)
+    try:
+        min_chunks_int = max(1, int(min_chunks))
+    except (TypeError, ValueError):
+        min_chunks_int = 1
     max_tokens_per_chunk = quality.get("max_tokens_per_chunk")
     try:
         max_tokens_per_chunk_int = int(max_tokens_per_chunk)
     except (TypeError, ValueError):
         max_tokens_per_chunk_int = policy["max_tokens"]
     max_tokens_per_chunk_int = min(max_tokens_per_chunk_int, policy["max_tokens"])
-    quality["max_tokens_per_chunk"] = max_tokens_per_chunk_int
-    quality["forbid_empty_text"] = bool(quality.get("forbid_empty_text", True))
-    quality["dedupe_near_duplicates"] = bool(
-        quality.get("dedupe_near_duplicates", True)
-    )
-    cloned["quality_checks"] = quality
+    quality_clean: Dict[str, object] = {
+        "min_chunks": min_chunks_int,
+        "max_tokens_per_chunk": max_tokens_per_chunk_int,
+        "forbid_empty_text": bool(quality.get("forbid_empty_text", True)),
+        "dedupe_near_duplicates": bool(
+            quality.get("dedupe_near_duplicates", True)
+        ),
+    }
+    cloned["quality_checks"] = quality_clean
 
     test_queries = cloned.get("test_queries")
     if not isinstance(test_queries, list):
