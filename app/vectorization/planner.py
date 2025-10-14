@@ -4,12 +4,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Sequence, Tuple, cast
 
 from ..llm_utils import LLM_MODEL_CANDIDATES, call_llm_with_retries
+from .gpt_planner import GPTStructurePlanner
 from .chunker import apply_plan
 from .models import (
     ChunkPreview,
@@ -26,6 +28,7 @@ from .models import (
     VectorizationPlan,
 )
 from .normalizer import Block
+from .plan_validator import validate_and_fix
 from .tokenization import DEFAULT_TOKENIZER, Tokenizer
 
 try:  # pragma: no cover - optional dependency
@@ -36,6 +39,8 @@ except Exception:  # pragma: no cover - optional dependency
 logger = logging.getLogger(__name__)
 
 ALLOWED_PLANNER_MODELS: Tuple[str, ...] = LLM_MODEL_CANDIDATES
+
+DEFAULT_PLAN_CACHE_DIR = ".plans_cache"
 
 
 @dataclass(slots=True)
@@ -72,6 +77,65 @@ def _looks_like_russian_code(blocks: Sequence[Block]) -> bool:
         if matches >= 3:
             return True
     return False
+
+
+def _plan_cache_key(text: str, filename: str) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(filename.encode("utf-8", "ignore"))
+    hasher.update(b"\0")
+    hasher.update((text[:2000] if text else "").encode("utf-8", "ignore"))
+    return hasher.hexdigest()
+
+
+def get_or_create_plan(
+    text: str,
+    filename: str,
+    *,
+    plan_path: str | os.PathLike[str] | None = None,
+    cache_dir: str | os.PathLike[str] = DEFAULT_PLAN_CACHE_DIR,
+) -> Dict[str, object]:
+    """Return a cached or freshly generated GPT plan for ``text``."""
+
+    os.makedirs(cache_dir, exist_ok=True)
+    plan_file: Path | None = None
+    if plan_path:
+        plan_file = Path(plan_path)
+        if plan_file.exists():
+            with plan_file.open("r", encoding="utf-8") as handle:
+                return json.load(handle)
+
+    cache_key = _plan_cache_key(text, filename)
+    cache_path = Path(cache_dir) / f"{cache_key}.json"
+    if cache_path.exists():
+        with cache_path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    planner = GPTStructurePlanner()
+    plan_dict = planner.generate_plan(text, filename)
+    plan_dict = validate_and_fix(plan_dict)
+
+    with cache_path.open("w", encoding="utf-8") as handle:
+        json.dump(plan_dict, handle, ensure_ascii=False, indent=2)
+
+    if plan_file:
+        plan_file.parent.mkdir(parents=True, exist_ok=True)
+        with plan_file.open("w", encoding="utf-8") as handle:
+            json.dump(plan_dict, handle, ensure_ascii=False, indent=2)
+
+    return plan_dict
+
+
+def vectorization_plan_from_dict(
+    plan_dict: Dict[str, object],
+    *,
+    blocks: Sequence[Block],
+    context: PlanningContext,
+) -> VectorizationPlan:
+    """Convert a GPT plan dictionary into a ``VectorizationPlan`` instance."""
+
+    normalized = _normalize_plan_dict(plan_dict, blocks=blocks, context=context)
+    normalized.setdefault("plan_source", "gpt(normalized)")
+    return VectorizationPlan.from_dict(normalized)
 
 
 def _normalize_plan_dict(
@@ -717,5 +781,7 @@ __all__ = [
     "VectorizationPlanner",
     "GPTPlanner",
     "build_fallback_plan",
+    "get_or_create_plan",
+    "vectorization_plan_from_dict",
 ]
 

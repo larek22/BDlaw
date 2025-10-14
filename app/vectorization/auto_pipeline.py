@@ -12,7 +12,13 @@ from typing import Callable, Dict, List, Sequence
 from .chunker import ChunkerResult, apply_plan
 from .models import DistanceMetric, VectorizationPlan
 from .normalizer import normalize_document
-from .planner import PlanningContext, VectorizationPlanner, build_fallback_plan
+from .planner import (
+    PlanningContext,
+    VectorizationPlanner,
+    build_fallback_plan,
+    get_or_create_plan,
+    vectorization_plan_from_dict,
+)
 from .quality import QualityMetrics, QualityReport, run_quality_checks
 from .service import filter_blocks_for_plan
 from .tokenization import DEFAULT_TOKENIZER, Tokenizer
@@ -155,8 +161,26 @@ class AutoVectorizationPipeline:
                 hard_cap=config.hard_cap,
                 test_queries=config.test_queries,
             )
-            preview = self.planner.analyze(blocks=blocks, context=context)
-            plan = preview.plan
+            plan: VectorizationPlan | None = None
+            combined_text = "\n".join(block.text for block in blocks if block.text)
+            sidecar = path.with_name(f"{path.stem}_plan.json")
+            try:
+                plan_dict = get_or_create_plan(
+                    combined_text,
+                    path.name,
+                    plan_path=sidecar,
+                )
+                plan = vectorization_plan_from_dict(
+                    plan_dict,
+                    blocks=blocks,
+                    context=context,
+                )
+            except Exception as exc:
+                logger.warning("Auto pipeline GPT plan failed: %s", exc)
+
+            if plan is None:
+                preview = self.planner.analyze(blocks=blocks, context=context)
+                plan = preview.plan
             filtered_blocks = filter_blocks_for_plan(blocks, plan)
             preview = self.planner.preview_from_plan(
                 blocks=filtered_blocks,

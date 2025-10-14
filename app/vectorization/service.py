@@ -1,17 +1,24 @@
 """Public service entry point for the vectorization workflow."""
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-import re
-
 from .chunker import apply_plan
 from .models import DistanceMetric, PlanPreview, VectorizationPlan
 from .normalizer import Block, normalize_document
-from .planner import PlanningContext, VectorizationPlanner
+from .planner import (
+    PlanningContext,
+    VectorizationPlanner,
+    get_or_create_plan,
+    vectorization_plan_from_dict,
+)
 from .tokenization import DEFAULT_TOKENIZER, Tokenizer
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -51,13 +58,42 @@ class VectorizationService:
             api_key=api_key,
             test_queries=test_queries,
         )
-        preview = self.planner.analyze(blocks=blocks, context=context)
-        filtered_blocks = filter_blocks_for_plan(blocks, preview.plan)
+        gpt_plan: VectorizationPlan | None = None
+        if api_key:
+            combined_text = "\n".join(block.text for block in blocks if block.text)
+            plan_sidecar = path.with_name(f"{path.stem}_plan.json")
+            try:
+                plan_dict = get_or_create_plan(
+                    combined_text,
+                    path.name,
+                    plan_path=plan_sidecar,
+                )
+                gpt_plan = vectorization_plan_from_dict(
+                    plan_dict,
+                    blocks=blocks,
+                    context=context,
+                )
+            except Exception as exc:
+                logger.warning("GPT auto-plan failed, falling back to legacy planner: %s", exc)
+
+        if gpt_plan is None:
+            preview = self.planner.analyze(blocks=blocks, context=context)
+            filtered_blocks = filter_blocks_for_plan(blocks, preview.plan)
+            refined_preview = self.planner.preview_from_plan(
+                blocks=filtered_blocks, plan=preview.plan
+            )
+            return VectorizationArtifacts(
+                plan=refined_preview.plan, preview=refined_preview, blocks=filtered_blocks
+            )
+
+        filtered_blocks = filter_blocks_for_plan(blocks, gpt_plan)
         refined_preview = self.planner.preview_from_plan(
-            blocks=filtered_blocks, plan=preview.plan
+            blocks=filtered_blocks, plan=gpt_plan
         )
         return VectorizationArtifacts(
-            plan=refined_preview.plan, preview=refined_preview, blocks=filtered_blocks
+            plan=refined_preview.plan,
+            preview=refined_preview,
+            blocks=filtered_blocks,
         )
 
     def apply_plan(

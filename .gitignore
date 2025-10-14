@@ -3,5 +3,6 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+.plans_cache/
 .venv/
 .vector_kb/
