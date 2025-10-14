@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, TYPE_CHECKING
 
-from .models import VectorizationPlan
+from .models import ChunkingPolicy, VectorizationPlan
 from .normalizer import Block
 from .tokenization import DEFAULT_TOKENIZER, Tokenizer
 
@@ -59,60 +59,37 @@ class ChunkerResult:
     token_usage: int
 
 
-def _build_overlap_window(
-    texts: Sequence[str],
-    tokens: Sequence[int],
-    meta: Sequence[Dict[str, object]],
-    overlap_tokens: int,
-    tokenizer: Tokenizer,
-) -> tuple[List[str], List[int], List[Dict[str, object]]]:
-    if overlap_tokens <= 0:
-        return [], [], []
+def _split_long_text(text: str, policy: ChunkingPolicy, tokenizer: Tokenizer) -> List[str]:
+    """Split text into deterministic slices within the token cap."""
+    if not text:
+        return []
 
-    collected_texts: List[str] = []
-    collected_tokens: List[int] = []
-    collected_meta: List[Dict[str, object]] = []
-    total = 0
+    max_tokens = max(1, policy.max_tokens)
+    overlap = max(0, min(policy.overlap_tokens, max_tokens - 1))
+    tokens = tokenizer.encode(text)
+    if not tokens:
+        return [text]
 
-    for text_piece, token_count, meta_piece in zip(
-        reversed(texts), reversed(tokens), reversed(meta)
-    ):
-        collected_texts.insert(0, text_piece)
-        collected_tokens.insert(0, token_count)
-        collected_meta.insert(0, meta_piece)
-        total += token_count
-        if total >= overlap_tokens:
+    step = max(1, max_tokens - overlap)
+    slices: List[str] = []
+    start = 0
+    while start < len(tokens):
+        end = min(start + max_tokens, len(tokens))
+        window = tokens[start:end]
+        if not window:
             break
+        decoded = tokenizer.decode(window)
+        counted = tokenizer.encode(decoded)
+        while len(counted) > max_tokens and len(window) > 1:
+            window = window[:-1]
+            decoded = tokenizer.decode(window)
+            counted = tokenizer.encode(decoded)
+        slices.append(decoded)
+        if end >= len(tokens):
+            break
+        start += step
 
-    if total <= overlap_tokens:
-        return collected_texts, collected_tokens, collected_meta
-
-    excess = total - overlap_tokens
-    idx = 0
-    while excess > 0 and idx < len(collected_texts):
-        token_count = collected_tokens[idx]
-        if token_count <= excess:
-            excess -= token_count
-            collected_texts.pop(idx)
-            collected_tokens.pop(idx)
-            collected_meta.pop(idx)
-            continue
-
-        keep_tokens = token_count - excess
-        if keep_tokens <= 0:
-            collected_texts.pop(idx)
-            collected_tokens.pop(idx)
-            collected_meta.pop(idx)
-            excess -= token_count
-            continue
-
-        encoded = tokenizer.encode(collected_texts[idx])
-        slice_tokens = encoded[-keep_tokens:]
-        collected_texts[idx] = tokenizer.decode(slice_tokens)
-        collected_tokens[idx] = len(slice_tokens)
-        excess = 0
-
-    return collected_texts, collected_tokens, collected_meta
+    return [segment for segment in slices if segment] or [text]
 
 
 def apply_plan(
@@ -123,68 +100,101 @@ def apply_plan(
 ) -> ChunkerResult:
     tokenizer = tokenizer or DEFAULT_TOKENIZER
     policy = plan.chunking_policy
+    overlap_tokens = max(0, min(policy.overlap_tokens, policy.max_tokens))
+
     chunks: List[Chunk] = []
-    overlap_tokens = policy.overlap_tokens
     window_texts: List[str] = []
     window_tokens: List[int] = []
+    window_meta: List[Dict[str, object]] = []
     window_token_total = 0
+
+    token_usage = 0
     chunk_index = 0
     last_start = -1
     last_end = -1
 
-    def flush_chunk(final: bool = False) -> None:
-        nonlocal window_texts, window_tokens, window_token_total, chunk_index, window_meta, last_start, last_end
+    named_hierarchy: Dict[str, str] = {}
+    current_heading: Dict[int, str] = {}
+    heading_regex = plan.hierarchy_rules.heading_regex or {}
 
-        if not window_texts:
-            return
-
-        previous_texts = list(window_texts)
-        previous_tokens = list(window_tokens)
-        previous_meta = list(window_meta)
-
+    def _reset_window() -> None:
+        nonlocal window_texts, window_tokens, window_meta, window_token_total
         window_texts = []
         window_tokens = []
         window_meta = []
         window_token_total = 0
 
-        text = "\n".join(previous_texts).strip()
-        if not text and plan.quality_checks.forbid_empty_text:
-            window_texts = []
-            window_tokens = []
-            window_token_total = 0
+    def _append_overlap(chunk: Chunk, meta_list: Sequence[Dict[str, object]]) -> None:
+        nonlocal window_texts, window_tokens, window_meta, window_token_total
+        if overlap_tokens <= 0:
             return
-        token_count = sum(previous_tokens)
+        encoded = tokenizer.encode(chunk.text)
+        if not encoded:
+            return
+        tail_len = min(overlap_tokens, len(encoded))
+        if tail_len <= 0:
+            return
+        overlap_slice = encoded[-tail_len:]
+        window_texts = [tokenizer.decode(overlap_slice)]
+        window_tokens = [len(overlap_slice)]
+        window_meta = list(meta_list)
+        window_token_total = sum(window_tokens)
+
+    def _emit_chunk(text: str, meta_list: Sequence[Dict[str, object]]) -> Chunk | None:
+        nonlocal chunk_index, last_start, last_end
+
+        cleaned_text = text.strip("\n")
+        if not cleaned_text and plan.quality_checks.forbid_empty_text:
+            return None
+
+        token_count = tokenizer.count(cleaned_text)
+        if token_count == 0 and plan.quality_checks.forbid_empty_text:
+            return None
+
         if token_count > policy.max_tokens:
-            raise RuntimeError(
-                f"Chunk tokens {token_count} exceed max {policy.max_tokens}"
-            )
-        start_pos = 0
-        end_pos = 0
-        if previous_meta:
-            start_pos = min(
-                meta.get("start", 0) for meta in previous_meta if isinstance(meta, dict)
-            )
-            end_pos = max(
-                meta.get("end", 0) for meta in previous_meta if isinstance(meta, dict)
-            )
-        if chunk_index > 0:
-            if start_pos <= last_start:
-                start_pos = last_start + 1
-            if end_pos <= start_pos:
-                end_pos = start_pos + 1
-            if end_pos <= last_end:
-                end_pos = last_end + 1
-        last_start = start_pos
-        last_end = end_pos
+            emitted: Chunk | None = None
+            for slice_text in _split_long_text(cleaned_text, policy, tokenizer):
+                emitted = _emit_chunk(slice_text, meta_list)
+            return emitted
+
+        start_candidates = [
+            meta.get("start")
+            for meta in meta_list
+            if isinstance(meta, dict) and isinstance(meta.get("start"), int)
+        ]
+        end_candidates = [
+            meta.get("end")
+            for meta in meta_list
+            if isinstance(meta, dict) and isinstance(meta.get("end"), int)
+        ]
+
+        if start_candidates:
+            start_pos = min(start_candidates)
+        else:
+            start_pos = last_end + 1 if last_end >= 0 else 0
+        if end_candidates:
+            end_pos = max(end_candidates)
+        else:
+            end_pos = start_pos + max(len(cleaned_text), 1)
+
+        if start_pos <= last_start:
+            start_pos = last_start + 1
+        if end_pos <= start_pos:
+            end_pos = start_pos + max(len(cleaned_text), 1)
+        if end_pos <= last_end:
+            end_pos = last_end + max(len(cleaned_text), 1)
+
+        source_path = blocks[0].path if blocks else ""
         chunk_id = _make_chunk_id(
             plan,
             start=start_pos,
             end=end_pos,
             index=chunk_index,
-            source=blocks[0].path if blocks else "",
+            source=source_path,
         )
+
         chunk_meta: Dict[str, object] = {
-            "source_file": blocks[0].path if blocks else "",
+            "source_file": source_path,
             "index": chunk_index,
         }
         if named_hierarchy:
@@ -192,80 +202,92 @@ def apply_plan(
             for field in plan.hierarchy_rules.path_fields:
                 if field in named_hierarchy:
                     chunk_meta[field] = named_hierarchy[field]
+
         heading_values = [value for _, value in sorted(current_heading.items())]
         title_candidate = (
             named_hierarchy.get("article")
             or named_hierarchy.get("chapter")
             or named_hierarchy.get("section")
-            or heading_values[-1]
-            if heading_values
-            else ""
+            or (heading_values[-1] if heading_values else "")
         )
         if title_candidate:
             chunk_meta["title_text"] = title_candidate
+
         row_indices = [
             meta.get("attrs", {}).get("row_index")
-            for meta in previous_meta
-            if isinstance(meta.get("attrs", {}).get("row_index"), int)
+            for meta in meta_list
+            if isinstance(meta, dict)
+            and isinstance(meta.get("attrs"), dict)
+            and isinstance(meta.get("attrs", {}).get("row_index"), int)
         ]
         if row_indices:
             chunk_meta["row_index"] = row_indices[-1]
-        source_path = blocks[0].path if blocks else ""
+
         if source_path and "doc_id" not in chunk_meta:
             chunk_meta["doc_id"] = Path(source_path).stem
-        chunks.append(
-            Chunk(
-                text=text,
-                tokens=token_count,
-                start=start_pos,
-                end=end_pos,
-                meta=chunk_meta,
-                chunk_id=chunk_id,
-            )
+
+        chunk = Chunk(
+            text=cleaned_text,
+            tokens=token_count,
+            start=start_pos,
+            end=end_pos,
+            meta=chunk_meta,
+            chunk_id=chunk_id,
         )
         chunk_meta["plan_chunk_id"] = chunk_id
+        chunks.append(chunk)
         chunk_index += 1
+        last_start = start_pos
+        last_end = end_pos
+        return chunk
 
-        if final or overlap_tokens <= 0:
+    def flush_chunk(final: bool = False) -> None:
+        if not window_texts:
             return
 
-        (
-            window_texts,
-            window_tokens,
-            window_meta,
-        ) = _build_overlap_window(
-            previous_texts,
-            previous_tokens,
-            previous_meta,
-            overlap_tokens,
-            tokenizer,
-        )
-        window_token_total = sum(window_tokens)
+        previous_texts = list(window_texts)
+        previous_meta = list(window_meta)
+        total_tokens = sum(window_tokens)
 
-    window_meta: List[Dict[str, object]] = []
-    token_usage = 0
-    named_hierarchy: Dict[str, str] = {}
+        _reset_window()
+
+        combined_text = "\n".join(previous_texts)
+        if not combined_text and plan.quality_checks.forbid_empty_text:
+            return
+
+        if total_tokens > policy.max_tokens:
+            segments = _split_long_text(combined_text, policy, tokenizer)
+        else:
+            segments = [combined_text]
+
+        last_chunk_emitted: Chunk | None = None
+        for segment in segments:
+            emitted = _emit_chunk(segment, previous_meta)
+            if emitted is not None:
+                last_chunk_emitted = emitted
+
+        if not final and last_chunk_emitted is not None:
+            _append_overlap(last_chunk_emitted, previous_meta)
 
     def add_block_text(block: Block, text: str) -> None:
         nonlocal window_token_total, token_usage
         if not text:
             return
+
         tokens = tokenizer.count(text)
         if tokens == 0 and plan.quality_checks.forbid_empty_text:
             return
-        token_usage += tokens
+
         if tokens > policy.max_tokens:
-            slices = _split_long_text(
-                text,
-                tokenizer,
-                policy.max_tokens,
-                policy.overlap_tokens,
-            )
-            for slice_text in slices:
+            for slice_text in _split_long_text(text, policy, tokenizer):
                 add_block_text(block, slice_text)
             return
-        if window_token_total + tokens > policy.max_tokens and window_texts:
+
+        token_usage += tokens
+
+        if window_texts and window_token_total + tokens > policy.max_tokens:
             flush_chunk()
+
         window_texts.append(text)
         window_tokens.append(tokens)
         block_meta = {
@@ -274,6 +296,7 @@ def apply_plan(
             "type": block.type,
             "attrs": dict(block.attrs or {}),
             "text": block.text,
+            "path": block.path,
         }
         window_meta.append(block_meta)
         window_token_total += tokens
@@ -286,18 +309,21 @@ def apply_plan(
                 continue
             buffer.append(block)
             if len(buffer) >= record_policy.records_per_chunk:
-                record_texts = [_record_payload_text(b, record_policy) for b in buffer]
-                combined = "\n".join(record_texts)
-                add_block_text(buffer[-1], combined)
+                record_text = "\n".join(
+                    _record_payload_text(item, record_policy) for item in buffer
+                )
+                add_block_text(buffer[-1], record_text)
+                flush_chunk()
                 buffer = []
         if buffer:
-            record_texts = [_record_payload_text(b, record_policy) for b in buffer]
-            combined = "\n".join(record_texts)
-            add_block_text(buffer[-1], combined)
+            record_text = "\n".join(
+                _record_payload_text(item, record_policy) for item in buffer
+            )
+            add_block_text(buffer[-1], record_text)
+            flush_chunk()
         flush_chunk(final=True)
         return ChunkerResult(chunks=chunks, token_usage=token_usage)
 
-    current_heading: Dict[int, str] = {}
     split_levels = {
         int(level[1:])
         for level in policy.split_on_headings
@@ -308,7 +334,6 @@ def apply_plan(
         for name in policy.split_on_headings
         if not (name.startswith("h") and name[1:].isdigit())
     }
-    heading_regex = plan.hierarchy_rules.heading_regex or {}
 
     for block in blocks:
         if block.type == "heading":
@@ -316,6 +341,7 @@ def apply_plan(
             current_heading[level] = block.text
             for deeper in [lvl for lvl in list(current_heading) if lvl > level]:
                 current_heading.pop(deeper, None)
+
             heading_text = block.text.strip()
             should_split = level in split_levels
             if split_names and heading_text:
@@ -332,13 +358,18 @@ def apply_plan(
                 flush_chunk()
             if heading_text:
                 add_block_text(block, heading_text)
+                flush_chunk()
             continue
+
         if block.type == "list_item" and policy.keep_lists_intact:
             add_block_text(block, f"- {block.text.strip()}")
             continue
+
         if block.type == "table" and policy.keep_tables_intact:
             add_block_text(block, block.text.strip())
+            flush_chunk()
             continue
+
         if block.type == "paragraph":
             text = block.text.strip()
             if policy.merge_short_paragraphs_under_tokens > 0:
@@ -351,6 +382,7 @@ def apply_plan(
                     continue
             add_block_text(block, text)
             continue
+
         add_block_text(block, block.text.strip())
 
     flush_chunk(final=True)
@@ -375,47 +407,6 @@ def _record_payload_text(block: Block, policy: "RecordChunking") -> str:
                 filtered[key] = data.get(key)
         return json.dumps(filtered, ensure_ascii=False)
     return block.text
-
-
-def _split_long_text(
-    text: str,
-    tokenizer: Tokenizer,
-    max_tokens: int,
-    overlap_tokens: int,
-) -> List[str]:
-    if not text:
-        return []
-    if max_tokens <= 0:
-        return [text]
-
-    tokens = tokenizer.encode(text)
-    if not tokens:
-        return [text]
-
-    overlap = max(0, min(overlap_tokens, max_tokens - 1))
-    step = max(1, max_tokens - overlap)
-
-    slices: List[str] = []
-    start = 0
-    while start < len(tokens):
-        end = min(start + max_tokens, len(tokens))
-        window = tokens[start:end]
-        if not window:
-            break
-        slice_text = tokenizer.decode(window)
-        # Guard against tokenizer decode/encode drift inflating token count
-        slice_tokens = tokenizer.encode(slice_text)
-        while len(slice_tokens) > max_tokens and len(window) > 1:
-            window = window[:-1]
-            slice_text = tokenizer.decode(window)
-            slice_tokens = tokenizer.encode(slice_text)
-        slices.append(slice_text)
-        if end >= len(tokens):
-            break
-        start += step
-
-    cleaned = [slice_text for slice_text in slices if slice_text]
-    return cleaned or [text]
 
 
 __all__ = ["Chunk", "ChunkerResult", "apply_plan"]

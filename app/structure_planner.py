@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 from .settings import AppSettings
 from .data_repository import DataRepository
+from .llm_utils import LLM_MODEL_CANDIDATES, call_llm_with_retries
 
 logger = logging.getLogger(__name__)
 
@@ -236,35 +237,35 @@ class StructurePlanner:
             return _DEFAULT_PLAN
         if self._client is None:
             return _DEFAULT_PLAN
+        system_prompt = (
+            "You are a legal document analyst. Return only JSON matching the schema "
+            "{plan_version, doc_type, levels, split}. Use the provided excerpt to detect "
+            "sections, chapters, articles, and numbered clauses."
+        )
+        user_prompt = (
+            "Generate a structure plan for the following Russian legal text excerpt. "
+            "Respond with JSON only.\n\n" + excerpt
+        )
+        candidates: list[str] = []
+        preferred = getattr(self.settings.openai_models, "chat", None)
+        if preferred:
+            candidates.append(preferred)
+        for model in LLM_MODEL_CANDIDATES:
+            if model not in candidates:
+                candidates.append(model)
         try:
-            response = self._client.chat.completions.create(  # type: ignore[call-arg]
-                model=self.settings.openai_models.chat,
+            content, model_used = call_llm_with_retries(
+                client=self._client,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                logger=logger,
+                candidates=candidates,
                 temperature=planner_settings.temperature,
-                max_tokens=planner_settings.max_tokens,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a legal document analyst. Return only JSON matching the schema "
-                            "{plan_version, doc_type, levels, split}. Use the provided excerpt to detect "
-                            "sections, chapters, articles, and numbered clauses."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            "Generate a structure plan for the following Russian legal text excerpt. "
-                            "Respond with JSON only.\n\n" + excerpt
-                        ),
-                    },
-                ],
+                max_output_tokens=planner_settings.max_tokens,
             )
-            choice = response.choices[0]
-            content = getattr(choice.message, "content", None)
-            if not content:
-                raise ValueError("Planner LLM returned empty content")
             plan_data = json.loads(content)
             plan = StructurePlan.model_validate(plan_data)
+            logger.info("Structure planner used model %s", model_used)
             return plan
         except Exception as exc:
             logger.warning("LLM structure planning failed, falling back to defaults: %s", exc)
