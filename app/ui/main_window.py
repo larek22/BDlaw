@@ -6,6 +6,7 @@ import re
 import time
 from pathlib import Path
 from typing import Sequence, cast
+from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QThread, Signal, Qt
 from PySide6.QtWidgets import (
@@ -433,16 +434,42 @@ class MainWindow(QMainWindow):
         self.query_tab.start_query.connect(self._start_query)
 
     def _init_services(self) -> None:
+        self.embedding_client = None
+        self.vector_store = None
+        self.ingest_service = None
+        self.query_pipeline = None
+        self.vectorization_service = None
+
         try:
-            self.embedding_client = EmbeddingClient(self.settings)
-            self.vector_store = QdrantVectorStore(self.settings)
-            self.ingest_service = IngestService(self.settings, self.embedding_client, self.vector_store)
-            self.query_pipeline = QueryPipeline(self.settings, self.embedding_client, self.vector_store)
-            self.vectorization_service = VectorizationService()
+            qdrant_url = (self.settings.qdrant.url or "").strip()
+            parsed = urlparse(qdrant_url) if qdrant_url else None
+            host = (parsed.hostname or "").lower() if parsed else ""
+            scheme = (parsed.scheme or "").lower() if parsed else ""
+            api_key = (self.settings.qdrant.api_key or "").strip()
+            if scheme == "https" and host.endswith("qdrant.io") and not api_key:
+                QMessageBox.warning(
+                    self,
+                    "Qdrant",
+                    "Qdrant API key is required for Qdrant Cloud endpoints. "
+                    "Please enter it on the Settings tab before continuing.",
+                )
+                return
+
+            embedding_client = EmbeddingClient(self.settings)
+            vector_store = QdrantVectorStore(self.settings)
+            ingest_service = IngestService(self.settings, embedding_client, vector_store)
+            query_pipeline = QueryPipeline(self.settings, embedding_client, vector_store)
+            vectorization_service = VectorizationService()
         except Exception as exc:
             QMessageBox.critical(self, "Initialization error", str(exc))
             logger.exception("Failed to initialize services")
-            self.vectorization_service = None
+            return
+
+        self.embedding_client = embedding_client
+        self.vector_store = vector_store
+        self.ingest_service = ingest_service
+        self.query_pipeline = query_pipeline
+        self.vectorization_service = vectorization_service
 
     def _test_openai(self) -> None:
         try:

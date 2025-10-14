@@ -23,6 +23,7 @@ from .qdrant_client import QdrantVectorStore
 from .vectorization.chunker import apply_plan as apply_vector_plan
 from .vectorization.models import VectorizationPlan
 from .vectorization.normalizer import normalize_document
+from .vectorization.service import filter_blocks_for_plan
 from .vectorization.tokenization import DEFAULT_TOKENIZER
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
@@ -240,7 +241,10 @@ class IngestService:
                 skipped += 1
                 continue
 
-            chunk_result = apply_vector_plan(blocks, plan, tokenizer=DEFAULT_TOKENIZER)
+            filtered_blocks = filter_blocks_for_plan(blocks, plan)
+            chunk_result = apply_vector_plan(
+                filtered_blocks, plan, tokenizer=DEFAULT_TOKENIZER
+            )
             if not chunk_result.chunks:
                 report(
                     f"Plan produced no chunks for {path.name}; skipping",
@@ -253,6 +257,20 @@ class IngestService:
             plan_hash = hashlib.sha256(
                 json.dumps(plan_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
             ).hexdigest()
+
+            manifest_dir = Path("data") / "manifests" / self.vector_store.collection_name
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            manifest_path = manifest_dir / f"{path.stem}.plan.json"
+            try:
+                manifest_path.write_text(
+                    json.dumps(plan_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                report(
+                    f"Failed to persist plan manifest for {path.name}: {exc}",
+                    level=logging.WARNING,
+                )
 
             chunk_records: List[ChunkRecord] = []
             title_texts: List[str] = []

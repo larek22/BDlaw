@@ -14,6 +14,7 @@ from .models import DistanceMetric, VectorizationPlan
 from .normalizer import normalize_document
 from .planner import PlanningContext, VectorizationPlanner, build_fallback_plan
 from .quality import QualityMetrics, QualityReport, run_quality_checks
+from .service import filter_blocks_for_plan
 from .tokenization import DEFAULT_TOKENIZER, Tokenizer
 
 logger = logging.getLogger(__name__)
@@ -139,8 +140,9 @@ class AutoVectorizationPipeline:
             if config.manual_plan is None:
                 raise ValueError("manual_plan must be provided when run_mode='manual'")
             plan = config.manual_plan
+            filtered_blocks = filter_blocks_for_plan(blocks, plan)
             preview = self.planner.preview_from_plan(
-                blocks=blocks,
+                blocks=filtered_blocks,
                 plan=plan,
                 sample_size=config.preview_limit,
             )
@@ -155,8 +157,14 @@ class AutoVectorizationPipeline:
             )
             preview = self.planner.analyze(blocks=blocks, context=context)
             plan = preview.plan
+            filtered_blocks = filter_blocks_for_plan(blocks, plan)
+            preview = self.planner.preview_from_plan(
+                blocks=filtered_blocks,
+                plan=plan,
+                sample_size=config.preview_limit,
+            )
 
-        chunk_result = apply_plan(blocks, plan, tokenizer=self.tokenizer)
+        chunk_result = apply_plan(filtered_blocks, plan, tokenizer=self.tokenizer)
         preview_data = [
             {
                 "text": chunk.text[:300],
@@ -170,7 +178,7 @@ class AutoVectorizationPipeline:
         ]
 
         quality = run_quality_checks(
-            blocks,
+            filtered_blocks,
             chunk_result,
             plan,
             coverage_threshold=config.coverage_threshold,

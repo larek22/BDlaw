@@ -17,6 +17,7 @@ from .models import (
     DistanceMetric,
     HierarchyRules,
     IdStrategy,
+    PreambleRules,
     PayloadSchema,
     PlanPreview,
     QualityChecks,
@@ -31,6 +32,8 @@ except Exception:  # pragma: no cover - optional dependency
     OpenAI = None  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+ALLOWED_PLANNER_MODELS: Tuple[str, ...] = ("gpt-4.1", "gpt-4o-mini")
 
 
 @dataclass(slots=True)
@@ -61,8 +64,6 @@ _RU_ARTICLE_RE = re.compile(r"(?im)^\s*статья\s+\d+")
 def _looks_like_russian_code(blocks: Sequence[Block]) -> bool:
     matches = 0
     for block in blocks:
-        if block.type != "heading":
-            continue
         if _RU_ARTICLE_RE.search(block.text):
             matches += 1
         if matches >= 3:
@@ -86,7 +87,9 @@ def build_fallback_plan(
         mode = "by_paragraphs"
 
     hierarchy_rules = HierarchyRules()
+    preamble_rules = PreambleRules()
     split_on_headings: list[str] = []
+    max_tokens = min(context.hard_cap, 1200)
     if mode == "by_headings":
         split_on_headings = ["article", "chapter", "section", "h1", "h2", "h3"]
         if looks_russian:
@@ -106,6 +109,17 @@ def build_fallback_plan(
                 "version",
             ]
             split_on_headings = ["article"]
+            preamble_rules = PreambleRules(
+                drop_before_first_heading="article",
+                exclude_regexes=[
+                    r"(?im)^\(в ред\.",
+                    r"(?im)^принят\s+государственной думой",
+                    r"(?im)^одобрен\s+советом федерации",
+                    r"(?im)^оглавление\b",
+                ],
+                max_frontmatter_chars=8000,
+            )
+            max_tokens = min(context.hard_cap, 900)
 
     source_name = Path(blocks[0].path).stem if blocks else "document"
 
@@ -120,9 +134,10 @@ def build_fallback_plan(
             ensure_uuid_if_missing=True,
         ),
         hierarchy_rules=hierarchy_rules,
+        preamble_rules=preamble_rules,
         chunking_policy=ChunkingPolicy(
             mode=cast(ChunkingMode, mode),
-            max_tokens=min(context.hard_cap, 1200),
+            max_tokens=max_tokens,
             overlap_tokens=120,
             split_on_headings=split_on_headings,
         ),
@@ -217,35 +232,46 @@ class GPTPlanner:
         )
 
     def _call_model(self, system_prompt: str, user_prompt: str) -> str:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+        user_content = [
+            {
+                "type": "text",
+                "text": user_prompt,
+            }
         ]
         responses_api = getattr(self.client, "responses", None)
         if responses_api is not None:
             try:
                 response = responses_api.create(  # type: ignore[call-arg]
                     model=self.model,
-                    input=messages,
+                    instructions=system_prompt,
+                    input=[{"role": "user", "content": user_content}],
                     temperature=0,
+                    max_output_tokens=2000,
                 )
-                output_text = getattr(response, "output_text", None)
-                if output_text:
-                    return output_text
-                return response.output[0].content[0].text  # type: ignore[index]
             except AttributeError:
                 logger.warning(
-                    "OpenAI client has no 'responses' output helpers; falling back to chat.completions"
+                    "OpenAI client has no 'responses' helpers; falling back to chat.completions"
                 )
             except Exception as exc:
                 raise RuntimeError("OpenAI Responses API call failed") from exc
+            else:
+                text = getattr(response, "output_text", None)
+                if text:
+                    return text
+                try:
+                    return response.output[0].content[0].text  # type: ignore[index]
+                except Exception as exc:  # pragma: no cover - SDK quirks
+                    raise RuntimeError("Unexpected Responses payload structure") from exc
         chat_api = getattr(getattr(self.client, "chat", None), "completions", None)
         if chat_api is None:  # pragma: no cover - protective guard for unexpected SDKs
             raise RuntimeError("OpenAI client does not provide a supported completion API")
         response = chat_api.create(
             model=self.model,
             temperature=0,
-            messages=messages,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
         )
         try:
             return response.choices[0].message.content  # type: ignore[index]
@@ -289,38 +315,58 @@ class VectorizationPlanner:
         return self._preview(blocks=blocks, plan=plan, sample_size=sample_size)
 
     def _generate_plan(self, *, blocks: Sequence[Block], context: PlanningContext) -> VectorizationPlan:
-        cache_key = self._cache_key(blocks, context)
-        cached = self._plan_cache.get(cache_key)
-        if cached is not None:
-            return VectorizationPlan.from_dict(json.loads(json.dumps(cached)))
-        planner: GPTPlanner | None = None
-        if context.chat_model and context.api_key:
-            try:
-                planner = GPTPlanner(model=context.chat_model, api_key=context.api_key)
-            except Exception as exc:  # pragma: no cover - network initialisation
-                logger.warning("Unable to initialise GPT planner: %s", exc)
-                planner = None
-        if planner is not None:
-            try:
-                plan = planner.plan(blocks=blocks, context=context)
+        candidate_models = self._candidate_models(context)
+        for model_name in candidate_models + ["fallback"]:
+            cache_key = self._cache_key(blocks, context, model_name)
+            cached = self._plan_cache.get(cache_key)
+            if cached is not None:
+                return VectorizationPlan.from_dict(json.loads(json.dumps(cached)))
+
+        if context.api_key:
+            for model_name in candidate_models:
+                try:
+                    planner = GPTPlanner(model=model_name, api_key=context.api_key)
+                except Exception as exc:  # pragma: no cover - client initialisation issues
+                    logger.warning("Unable to initialise GPT planner (%s): %s", model_name, exc)
+                    continue
+                try:
+                    plan = planner.plan(blocks=blocks, context=context)
+                except Exception as exc:
+                    logger.warning(
+                        "GPT planning with model %s failed: %s", model_name, exc
+                    )
+                    continue
                 plan = plan.model_copy(update={"plan_source": "gpt"})
+                cache_key = self._cache_key(blocks, context, model_name)
                 self._plan_cache[cache_key] = plan.model_dump()
                 return plan
-            except Exception as exc:
-                logger.warning("GPT planning failed, using fallback: %s", exc)
+
         plan = build_fallback_plan(blocks=blocks, context=context)
+        cache_key = self._cache_key(blocks, context, "fallback")
         self._plan_cache[cache_key] = plan.model_dump()
         return plan
 
     def cache_info(self) -> Dict[str, int]:
         return {"entries": len(self._plan_cache)}
 
-    def _cache_key(self, blocks: Sequence[Block], context: PlanningContext) -> Tuple[str, str, str]:
+    def _cache_key(
+        self, blocks: Sequence[Block], context: PlanningContext, model_name: str
+    ) -> Tuple[str, str, str]:
         return (
             self._hash_blocks(blocks),
             context.file_type,
-            context.embedding_model,
+            model_name,
         )
+
+    def _candidate_models(self, context: PlanningContext) -> list[str]:
+        models: list[str] = []
+        preferred = context.chat_model
+        if preferred and preferred in ALLOWED_PLANNER_MODELS and preferred not in models:
+            models.append(preferred)
+        for model_name in ALLOWED_PLANNER_MODELS:
+            if model_name not in models:
+                models.append(model_name)
+        return models
 
     def _hash_blocks(self, blocks: Sequence[Block]) -> str:
         hasher = hashlib.sha256()
@@ -372,3 +418,4 @@ __all__ = [
     "GPTPlanner",
     "build_fallback_plan",
 ]
+

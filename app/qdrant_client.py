@@ -662,7 +662,7 @@ class QdrantVectorStore:
             "created_at": datetime.utcnow().isoformat() + "Z",
         }
         point = rest.PointStruct(
-            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"plan:{collection}:{plan_hash}")),
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"plan:{collection}")),
             vector={
                 "title_vec": zero_vector,
                 "body_vec": zero_vector,

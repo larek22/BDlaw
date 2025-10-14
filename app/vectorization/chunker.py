@@ -71,9 +71,11 @@ def apply_plan(
     window_tokens: List[int] = []
     window_token_total = 0
     chunk_index = 0
+    last_start = -1
+    last_end = -1
 
     def flush_chunk(final: bool = False) -> None:
-        nonlocal window_texts, window_tokens, window_token_total, chunk_index, window_meta
+        nonlocal window_texts, window_tokens, window_token_total, chunk_index, window_meta, last_start, last_end
         if not window_texts:
             return
         text = "\n".join(window_texts).strip()
@@ -87,6 +89,15 @@ def apply_plan(
         if window_meta:
             start_pos = min(meta.get("start", 0) for meta in window_meta if isinstance(meta, dict))
             end_pos = max(meta.get("end", 0) for meta in window_meta if isinstance(meta, dict))
+        if chunk_index > 0:
+            if start_pos <= last_start:
+                start_pos = last_start + 1
+            if end_pos <= start_pos:
+                end_pos = start_pos + 1
+            if end_pos <= last_end:
+                end_pos = last_end + 1
+        last_start = start_pos
+        last_end = end_pos
         chunk_id = _make_chunk_id(
             plan,
             start=start_pos,

@@ -43,6 +43,17 @@ class HierarchyRules:
 
 
 @dataclass(slots=True)
+class PreambleRules:
+    drop_before_first_heading: Optional[str] = None
+    exclude_regexes: List[str] = field(default_factory=list)
+    max_frontmatter_chars: int = 8000
+
+    def __post_init__(self) -> None:
+        if self.max_frontmatter_chars < 0:
+            raise ValueError("max_frontmatter_chars cannot be negative")
+
+
+@dataclass(slots=True)
 class RecordChunking:
     primary_key: Optional[str] = None
     fields_include: List[str] = field(default_factory=lambda: ["*"])
@@ -100,6 +111,7 @@ class VectorizationPlan:
     plan_source: PlanSource
     id_strategy: IdStrategy
     hierarchy_rules: HierarchyRules = field(default_factory=HierarchyRules)
+    preamble_rules: PreambleRules = field(default_factory=PreambleRules)
     chunking_policy: ChunkingPolicy = field(default_factory=ChunkingPolicy)
     payload_schema: PayloadSchema = field(default_factory=PayloadSchema)
     quality_checks: QualityChecks = field(default_factory=QualityChecks)
@@ -122,6 +134,7 @@ class VectorizationPlan:
         version_regex = hierarchy_data.get("version_regex")
         if isinstance(version_regex, str) and version_regex.lower() == "null":
             hierarchy_data["version_regex"] = None
+        preamble_data = dict(payload.get("preamble_rules", {}) or {})
         return cls(
             doc_type=str(payload.get("doc_type", "")),
             collection_name=str(payload.get("collection_name", "")),
@@ -130,6 +143,7 @@ class VectorizationPlan:
             plan_source=payload.get("plan_source", "fallback"),  # type: ignore[arg-type]
             id_strategy=IdStrategy(**payload.get("id_strategy", {})),
             hierarchy_rules=HierarchyRules(**hierarchy_data),
+            preamble_rules=PreambleRules(**preamble_data),
             chunking_policy=ChunkingPolicy(
                 **chunking_data,
                 record_chunking=RecordChunking(**record_data) if record_data else RecordChunking(),
@@ -171,6 +185,14 @@ class VectorizationPlan:
                         },
                         "version_regex": {"type": ["string", "null"]},
                         "path_fields": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+                "preamble_rules": {
+                    "type": "object",
+                    "properties": {
+                        "drop_before_first_heading": {"type": ["string", "null"]},
+                        "exclude_regexes": {"type": "array", "items": {"type": "string"}},
+                        "max_frontmatter_chars": {"type": "integer", "minimum": 0},
                     },
                 },
                 "chunking_policy": {
@@ -247,4 +269,5 @@ __all__ = [
     "RecordChunking",
     "PayloadSchema",
     "QualityChecks",
+    "PreambleRules",
 ]
