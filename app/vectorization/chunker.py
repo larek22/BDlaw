@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, TYPE_CHECKING
 
 from .models import VectorizationPlan
@@ -24,10 +26,22 @@ class Chunk:
     chunk_id: str
 
 
-def _make_chunk_id(plan: VectorizationPlan, *, start: int, end: int, index: int, source: str) -> str:
+def _make_chunk_id(
+    plan: VectorizationPlan,
+    *,
+    start: int,
+    end: int,
+    index: int,
+    source: str,
+) -> str:
     pattern = plan.id_strategy.pattern
-    candidate = pattern.replace("{start}", str(start)).replace("{end}", str(end)).replace(
-        "{index}", str(index)
+    source_basename = Path(source).stem if source else "document"
+    candidate = (
+        pattern.replace("{start}", str(start))
+        .replace("{end}", str(end))
+        .replace("{index}", str(index))
+        .replace("{source_basename}", source_basename)
+        .replace("{source}", source)
     )
     if "{uuid" in pattern:
         candidate = candidate.replace("{uuid}", uuid.uuid4().hex)
@@ -165,15 +179,32 @@ def apply_plan(
         return ChunkerResult(chunks=chunks, token_usage=token_usage)
 
     current_heading: Dict[int, str] = {}
-    split_levels = {int(level[1:]) if level.startswith("h") and level[1:].isdigit() else 0 for level in policy.split_on_headings}
+    split_levels = {
+        int(level[1:])
+        for level in policy.split_on_headings
+        if level.startswith("h") and level[1:].isdigit()
+    }
+    split_names = {
+        name
+        for name in policy.split_on_headings
+        if not (name.startswith("h") and name[1:].isdigit())
+    }
+    heading_regex = plan.hierarchy_rules.heading_regex or {}
 
     for block in blocks:
         if block.type == "heading":
             level = int(block.attrs.get("level", 1))
             current_heading[level] = block.text
-            if split_levels and level in split_levels and window_texts:
-                flush_chunk()
             heading_text = block.text.strip()
+            should_split = level in split_levels
+            if split_names and heading_text:
+                for name in split_names:
+                    pattern = heading_regex.get(name)
+                    if pattern and re.search(pattern, heading_text):
+                        should_split = True
+                        break
+            if should_split and window_texts:
+                flush_chunk()
             if heading_text:
                 add_block_text(block, heading_text)
             continue

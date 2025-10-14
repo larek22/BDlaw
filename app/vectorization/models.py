@@ -21,9 +21,25 @@ class IdStrategy:
 
 @dataclass(slots=True)
 class HierarchyRules:
-    heading_regex: Dict[str, str] = field(default_factory=dict)
+    heading_regex: Dict[str, str] = field(
+        default_factory=lambda: {
+            "section": r"(?im)^section\s+\d+",  # generic western legal numbering
+            "part": r"(?im)^part\s+[ivxcl]+",  # roman numerals
+            "chapter": r"(?im)^chapter\s+\d+",  # chapters
+            "article": r"(?im)^(article|art\.)\s+\d+",  # articles/clauses
+        }
+    )
     version_regex: Optional[str] = None
-    path_fields: List[str] = field(default_factory=list)
+    path_fields: List[str] = field(
+        default_factory=lambda: [
+            "corpus",
+            "section",
+            "part",
+            "chapter",
+            "article",
+            "version",
+        ]
+    )
 
 
 @dataclass(slots=True)
@@ -58,7 +74,13 @@ class ChunkingPolicy:
 
 @dataclass(slots=True)
 class PayloadSchema:
-    fields: Dict[str, str] = field(default_factory=dict)
+    fields: Dict[str, str] = field(
+        default_factory=lambda: {
+            "doc_id": "string",
+            "source_file": "string",
+            "lang": "string|null",
+        }
+    )
 
 
 @dataclass(slots=True)
@@ -96,6 +118,10 @@ class VectorizationPlan:
     def from_dict(cls, payload: Dict[str, object]) -> "VectorizationPlan":
         chunking_data = dict(payload.get("chunking_policy", {}) or {})
         record_data = chunking_data.pop("record_chunking", {}) or {}
+        hierarchy_data = dict(payload.get("hierarchy_rules", {}) or {})
+        version_regex = hierarchy_data.get("version_regex")
+        if isinstance(version_regex, str) and version_regex.lower() == "null":
+            hierarchy_data["version_regex"] = None
         return cls(
             doc_type=str(payload.get("doc_type", "")),
             collection_name=str(payload.get("collection_name", "")),
@@ -103,7 +129,7 @@ class VectorizationPlan:
             distance=payload.get("distance", "cosine"),  # type: ignore[arg-type]
             plan_source=payload.get("plan_source", "fallback"),  # type: ignore[arg-type]
             id_strategy=IdStrategy(**payload.get("id_strategy", {})),
-            hierarchy_rules=HierarchyRules(**payload.get("hierarchy_rules", {})),
+            hierarchy_rules=HierarchyRules(**hierarchy_data),
             chunking_policy=ChunkingPolicy(
                 **chunking_data,
                 record_chunking=RecordChunking(**record_data) if record_data else RecordChunking(),
@@ -134,8 +160,16 @@ class VectorizationPlan:
                 "hierarchy_rules": {
                     "type": "object",
                     "properties": {
-                        "heading_regex": {"type": "object"},
-                        "version_regex": {"type": "string"},
+                        "heading_regex": {
+                            "type": "object",
+                            "properties": {
+                                "section": {"type": "string"},
+                                "part": {"type": "string"},
+                                "chapter": {"type": "string"},
+                                "article": {"type": "string"},
+                            },
+                        },
+                        "version_regex": {"type": ["string", "null"]},
                         "path_fields": {"type": "array", "items": {"type": "string"}},
                     },
                 },
@@ -149,11 +183,27 @@ class VectorizationPlan:
                         "keep_lists_intact": {"type": "boolean"},
                         "keep_tables_intact": {"type": "boolean"},
                         "merge_short_paragraphs_under_tokens": {"type": "integer"},
-                        "record_chunking": {"type": "object"},
+                        "record_chunking": {
+                            "type": "object",
+                            "properties": {
+                                "primary_key": {"type": ["string", "null"]},
+                                "fields_include": {"type": "array", "items": {"type": "string"}},
+                                "fields_exclude": {"type": "array", "items": {"type": "string"}},
+                                "records_per_chunk": {"type": "integer", "minimum": 1},
+                            },
+                        },
                     },
                 },
                 "payload_schema": {"type": "object"},
-                "quality_checks": {"type": "object"},
+                "quality_checks": {
+                    "type": "object",
+                    "properties": {
+                        "min_chunks": {"type": "integer"},
+                        "max_tokens_per_chunk": {"type": "integer"},
+                        "forbid_empty_text": {"type": "boolean"},
+                        "dedupe_near_duplicates": {"type": "boolean"},
+                    },
+                },
                 "test_queries": {"type": "array", "items": {"type": "string"}},
             },
             "required": [
