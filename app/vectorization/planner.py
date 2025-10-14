@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Sequence, Tuple, cast
 
+from ..llm_utils import LLM_MODEL_CANDIDATES, call_llm_with_retries
 from .chunker import apply_plan
 from .models import (
     ChunkPreview,
@@ -34,7 +35,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_PLANNER_MODELS: Tuple[str, ...] = ("gpt-4o-mini", "gpt-4.1")
+ALLOWED_PLANNER_MODELS: Tuple[str, ...] = LLM_MODEL_CANDIDATES
 
 
 @dataclass(slots=True)
@@ -52,11 +53,12 @@ class PlanningContext:
 DEFAULT_PAYLOAD_FIELDS: Dict[str, str] = {
     "doc_id": "string",
     "source_file": "string",
-    "path": "string",
     "lang": "string|null",
+    "title_text": "string",
+    "body_text": "string",
+    "hierarchy": "object",
+    "law_meta": "object",
     "row_index": "int|null",
-    "plan_hash": "string|null",
-    "plan_source": "string",
 }
 
 _RU_ARTICLE_RE = re.compile(r"(?im)^\s*статья\s+\d+")
@@ -100,14 +102,13 @@ def _normalize_plan_dict(
         fields["title_text"] = fields.pop("title")
     if "body" in fields and "body_text" not in fields:
         fields["body_text"] = fields.pop("body")
-    fields.setdefault("title_text", "string|null")
-    fields.setdefault("body_text", "string")
-    for key, value in list(fields.items()):
-        if not isinstance(value, str):
-            fields[key] = "string" if value is None else str(value)
+    sanitised_fields: Dict[str, str] = {}
+    for key, value in fields.items():
+        if key in DEFAULT_PAYLOAD_FIELDS:
+            sanitised_fields[key] = str(value)
     for key, dtype in DEFAULT_PAYLOAD_FIELDS.items():
-        fields.setdefault(key, dtype)
-    payload_schema_clean: Dict[str, object] = {"fields": fields}
+        sanitised_fields.setdefault(key, dtype)
+    payload_schema_clean: Dict[str, object] = {"fields": sanitised_fields}
     cloned["payload_schema"] = payload_schema_clean
 
     id_strategy = cloned.get("id_strategy")
@@ -447,53 +448,59 @@ class GPTPlanner:
         )
         user_prompt = self._build_prompt(context, outline, samples, schema)
 
-        errors: list[str] = []
-        for model_name in self._models:
-            try:
-                payload = self._call_model(model_name, system_prompt, user_prompt)
-            except Exception as exc:
-                logger.warning("Planner call failed for %s: %s", model_name, exc)
-                errors.append(f"{model_name}: {exc}")
-                continue
+        try:
+            payload, model_used = call_llm_with_retries(
+                client=self.client,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                logger=logger,
+                candidates=self._models,
+                temperature=0.0,
+                max_output_tokens=2000,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Planner call failed for all models: {exc}") from exc
 
+        try:
+            plan = self._build_plan_from_payload(
+                payload,
+                model_name=model_used,
+                blocks=blocks,
+                context=context,
+            )
+            self._last_model_used = model_used
+            return plan
+        except RuntimeError as exc:
+            logger.debug(
+                "GPT plan invalid for model %s, attempting repair: %s",
+                model_used,
+                exc,
+            )
+            repair_prompt = self._build_repair_prompt(schema, str(exc))
+            retry_candidates = [model_used] + [
+                name for name in self._models if name != model_used
+            ]
             try:
-                plan = self._build_plan_from_payload(
-                    payload,
-                    model_name=model_name,
-                    blocks=blocks,
-                    context=context,
+                repaired_payload, repaired_model = call_llm_with_retries(
+                    client=self.client,
+                    system_prompt=system_prompt,
+                    user_prompt=repair_prompt,
+                    logger=logger,
+                    candidates=retry_candidates,
+                    temperature=0.0,
+                    max_output_tokens=2000,
                 )
-                self._last_model_used = model_name
-                return plan
-            except RuntimeError as exc:
-                logger.debug(
-                    "GPT plan invalid for model %s, attempting repair: %s",
-                    model_name,
-                    exc,
-                )
-                repair_prompt = self._build_repair_prompt(schema, str(exc))
-                try:
-                    repaired_payload = self._call_model(
-                        model_name, system_prompt, repair_prompt
-                    )
-                    plan = self._build_plan_from_payload(
-                        repaired_payload,
-                        model_name=model_name,
-                        blocks=blocks,
-                        context=context,
-                    )
-                    self._last_model_used = model_name
-                    return plan
-                except Exception as repair_exc:
-                    logger.warning(
-                        "Planner repair failed for %s: %s", model_name, repair_exc
-                    )
-                    errors.append(f"{model_name}: {repair_exc}")
-                    continue
+            except Exception as repair_exc:
+                raise RuntimeError(f"Plan repair failed: {repair_exc}") from repair_exc
 
-        raise RuntimeError(
-            "All planner models failed: " + ("; ".join(errors) if errors else "no models available")
-        )
+            plan = self._build_plan_from_payload(
+                repaired_payload,
+                model_name=repaired_model,
+                blocks=blocks,
+                context=context,
+            )
+            self._last_model_used = repaired_model
+            return plan
 
     def _build_outline(self, blocks: Sequence[Block]) -> str:
         headings = [block.text for block in blocks if block.type == "heading"]
@@ -570,68 +577,6 @@ class GPTPlanner:
             return VectorizationPlan.from_dict(normalized)
         except Exception as exc:
             raise RuntimeError(f"Plan validation failed: {exc}") from exc
-
-    def _call_model(self, model_name: str, system_prompt: str, user_prompt: str) -> str:
-        user_content = [
-            {
-                "type": "text",
-                "text": user_prompt,
-            }
-        ]
-        responses_api = getattr(self.client, "responses", None)
-        if responses_api is not None:
-            try:
-                response = responses_api.create(  # type: ignore[call-arg]
-                    model=model_name,
-                    instructions=system_prompt,
-                    input=[{"role": "user", "content": user_content}],
-                    temperature=0,
-                    max_output_tokens=2000,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Planner Responses failed for %s: %r", model_name, exc
-                )
-            else:
-                text = getattr(response, "output_text", None)
-                if text:
-                    logger.info("Planner success via Responses API with model %s", model_name)
-                    return text
-                try:
-                    result = response.output[0].content[0].text  # type: ignore[index]
-                except Exception as exc:  # pragma: no cover - SDK quirks
-                    logger.warning(
-                        "Planner Responses payload parse failed for %s: %r",
-                        model_name,
-                        exc,
-                    )
-                else:
-                    logger.info(
-                        "Planner success via Responses API with model %s", model_name
-                    )
-                    return result
-
-        chat_api = getattr(getattr(self.client, "chat", None), "completions", None)
-        if chat_api is None:  # pragma: no cover - protective guard for unexpected SDKs
-            raise RuntimeError("OpenAI client does not provide a supported completion API")
-        try:
-            response = chat_api.create(
-                model=model_name,
-                temperature=0,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-        except Exception as exc:
-            logger.warning("Planner Chat failed for %s: %r", model_name, exc)
-            raise RuntimeError(str(exc)) from exc
-        try:
-            result = response.choices[0].message.content  # type: ignore[index]
-        except Exception as exc:  # pragma: no cover - defensive guard
-            raise RuntimeError("Unexpected GPT chat response structure") from exc
-        logger.info("Planner success via Chat Completions with model %s", model_name)
-        return result
 
     def _parse_plan_payload(self, payload: str) -> Dict[str, object]:
         try:

@@ -13,7 +13,12 @@ from app.vectorization.auto_pipeline import (
 from app.vectorization.chunker import ChunkerResult, apply_plan
 from app.vectorization.models import DistanceMetric, VectorizationPlan
 from app.vectorization.normalizer import Block
-from app.vectorization.planner import PlanningContext, VectorizationPlanner, build_fallback_plan
+from app.vectorization.planner import (
+    PlanningContext,
+    VectorizationPlanner,
+    build_fallback_plan,
+    _normalize_plan_dict,
+)
 from app.vectorization.quality import run_quality_checks
 from app.vectorization.service import VectorizationService, filter_blocks_for_plan
 
@@ -197,6 +202,47 @@ def test_vectorization_service_analysis(tmp_path: Path) -> None:
     )
     assert artifacts.plan.collection_name == "demo"
     assert artifacts.preview.chunks
+
+
+def test_normalize_plan_remaps_payload_fields(sample_blocks: list[Block]) -> None:
+    plan_data = {
+        "payload_schema": {"fields": {"title": "string", "custom": "int"}},
+        "chunking_policy": {"max_tokens": 500},
+    }
+    context = PlanningContext(
+        embedding_model="text-embedding-3-small",
+        distance="cosine",
+        collection_name="demo",
+        file_type="txt",
+        hard_cap=500,
+    )
+    normalized = _normalize_plan_dict(plan_data, blocks=sample_blocks, context=context)
+    fields = normalized["payload_schema"]["fields"]
+    assert "title" not in fields
+    assert fields["title_text"] == "string"
+    assert "custom" not in fields
+    assert fields["hierarchy"] == "object"
+    assert fields["law_meta"] == "object"
+
+
+def test_ru_chunks_include_hierarchy_and_titles(russian_blocks: list[Block]) -> None:
+    context = PlanningContext(
+        embedding_model="text-embedding-3-small",
+        distance="cosine",
+        collection_name="demo",
+        file_type="rtf",
+        hard_cap=900,
+    )
+    plan = build_fallback_plan(blocks=russian_blocks, context=context)
+    filtered = filter_blocks_for_plan(russian_blocks, plan)
+    result = apply_plan(filtered, plan)
+    assert result.chunks
+    first = result.chunks[0]
+    assert first.meta.get("title_text", "").startswith("Статья 1")
+    hierarchy = first.meta.get("hierarchy") or {}
+    assert hierarchy.get("article_no_int") == 1
+    assert first.meta.get("lang") == "ru"
+    assert all(chunk.tokens <= plan.chunking_policy.max_tokens for chunk in result.chunks)
 
 
 def test_planner_cache_reuse(sample_blocks: list[Block]) -> None:
