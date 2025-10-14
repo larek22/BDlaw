@@ -6,7 +6,13 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional
+
+
+try:  # pragma: no cover - optional dependency is exercised in integration tests
+    from striprtf.striprtf import rtf_to_text
+except Exception:  # pragma: no cover - graceful fallback when striprtf missing
+    rtf_to_text = None  # type: ignore[assignment]
 
 
 @dataclass(slots=True)
@@ -19,6 +25,30 @@ class Block:
 
 
 _HEADING_RE = re.compile(r"^(?P<prefix>#{1,6}|\s*(?:h[1-6]|section|chapter|article)\b[:\s]*)\s*(?P<text>.+)$", re.IGNORECASE)
+_TRAILING_WS_BEFORE_NL = re.compile(r"[ \t\f\v]+\n")
+
+
+def _clean_extracted_text(content: str) -> str:
+    text = content.replace("\r\n", "\n").replace("\r", "\n")
+    text = _TRAILING_WS_BEFORE_NL.sub("\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _read_text_document(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".rtf":
+        raw = path.read_text(encoding="utf-8", errors="ignore")
+        if rtf_to_text is not None:
+            try:
+                extracted = rtf_to_text(raw)
+            except Exception:  # pragma: no cover - safety net for parser edge cases
+                extracted = raw
+        else:  # pragma: no cover - dependency intentionally optional
+            extracted = raw
+        return _clean_extracted_text(extracted)
+    raw = path.read_text(encoding="utf-8", errors="ignore")
+    return _clean_extracted_text(raw)
 
 
 def _iter_plain_blocks(content: str, *, path: Path) -> Iterator[Block]:
@@ -119,9 +149,9 @@ def normalize_document(path: Path, *, content_override: Optional[str] = None) ->
         return _normalize_jsonl(path)
 
     if content_override is not None:
-        content = content_override
+        content = _clean_extracted_text(content_override)
     else:
-        content = path.read_text(encoding="utf-8", errors="ignore")
+        content = _read_text_document(path)
 
     blocks = list(_iter_plain_blocks(content, path=path))
     if not blocks:

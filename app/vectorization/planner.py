@@ -217,18 +217,40 @@ class GPTPlanner:
         )
 
     def _call_model(self, system_prompt: str, user_prompt: str) -> str:
-        response = self.client.responses.create(  # type: ignore[attr-defined]
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        responses_api = getattr(self.client, "responses", None)
+        if responses_api is not None:
+            try:
+                response = responses_api.create(  # type: ignore[call-arg]
+                    model=self.model,
+                    input=messages,
+                    temperature=0,
+                )
+                output_text = getattr(response, "output_text", None)
+                if output_text:
+                    return output_text
+                return response.output[0].content[0].text  # type: ignore[index]
+            except AttributeError:
+                logger.warning(
+                    "OpenAI client has no 'responses' output helpers; falling back to chat.completions"
+                )
+            except Exception as exc:
+                raise RuntimeError("OpenAI Responses API call failed") from exc
+        chat_api = getattr(getattr(self.client, "chat", None), "completions", None)
+        if chat_api is None:  # pragma: no cover - protective guard for unexpected SDKs
+            raise RuntimeError("OpenAI client does not provide a supported completion API")
+        response = chat_api.create(
             model=self.model,
-            input=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
             temperature=0,
+            messages=messages,
         )
         try:
-            return response.output[0].content[0].text  # type: ignore[index]
+            return response.choices[0].message.content  # type: ignore[index]
         except Exception as exc:  # pragma: no cover - defensive guard
-            raise RuntimeError("Unexpected GPT response structure") from exc
+            raise RuntimeError("Unexpected GPT chat response structure") from exc
 
     def _parse_plan(self, payload: str) -> VectorizationPlan:
         try:

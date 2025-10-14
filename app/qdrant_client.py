@@ -46,27 +46,17 @@ class QdrantVectorStore:
 
         client_kwargs: dict[str, object] = {
             "url": url,
-            "timeout": settings.qdrant.timeout_seconds,
             "prefer_grpc": settings.qdrant.prefer_grpc,
         }
-        httpx_client: httpx.Client | None = None
         try:
             timeout = httpx.Timeout(
-                timeout=settings.qdrant.read_timeout_seconds,
-                connect=settings.qdrant.connect_timeout_seconds,
-                read=settings.qdrant.read_timeout_seconds,
-                write=settings.qdrant.write_timeout_seconds,
+                connect=float(settings.qdrant.connect_timeout_seconds),
+                read=float(settings.qdrant.read_timeout_seconds),
+                write=float(settings.qdrant.write_timeout_seconds),
             )
-            limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
-            httpx_client = httpx.Client(
-                timeout=timeout,
-                limits=limits,
-                http2=True,
-            )
-            client_kwargs["httpx_client"] = httpx_client
-        except AttributeError:
-            logger.warning("httpx.Timeout unavailable; using scalar timeout configuration")
-        self._httpx_client = httpx_client
+            client_kwargs["timeout"] = timeout
+        except Exception:  # pragma: no cover - defensive guard around timeout coercion
+            client_kwargs["timeout"] = float(settings.qdrant.timeout_seconds)
         if settings.qdrant.prefer_grpc:
             client_kwargs["grpc_port"] = settings.qdrant.grpc_port
 
@@ -79,25 +69,27 @@ class QdrantVectorStore:
         self._timeout = settings.qdrant.timeout_seconds
 
         self._api_key: Optional[str] = None
-        if url.startswith("https://"):
-            parsed_url = urlparse(url)
-            host = (parsed_url.hostname or "").lower()
-            if not api_key:
-                if host in {"localhost", "127.0.0.1", "::1"} or settings.qdrant.allow_insecure_https_without_api_key:
-                    logger.warning(
-                        "HTTPS endpoint %s missing API key; proceeding for local testing", url
-                    )
-                else:
-                    raise ValueError("Qdrant API key is required for HTTPS endpoints")
+        parsed_url = urlparse(url)
+        scheme = (parsed_url.scheme or "").lower()
+        host = (parsed_url.hostname or "").lower()
+        is_https = scheme == "https"
+        is_cloud = "qdrant.io" in host if host else False
+        if is_https and is_cloud and not api_key:
+            raise ValueError("Qdrant API key is required for Qdrant Cloud HTTPS endpoints")
+        if api_key:
+            client_kwargs["api_key"] = api_key
+            self._api_key = api_key
+        elif is_https and host not in {"localhost", "127.0.0.1", "::1"}:
+            if settings.qdrant.allow_insecure_https_without_api_key:
+                logger.warning(
+                    "HTTPS endpoint %s missing API key; continuing because allow_insecure_https_without_api_key is enabled",
+                    url,
+                )
             else:
-                client_kwargs["api_key"] = api_key
-                self._api_key = api_key
-        elif url.startswith("http://"):
-            if "localhost" not in url and "127.0.0.1" not in url and api_key:
-                client_kwargs["api_key"] = api_key
-                self._api_key = api_key
-        else:
-            raise ValueError(f"Unsupported Qdrant URL: {url}")
+                logger.info(
+                    "HTTPS endpoint %s missing API key; continuing without authentication for non-cloud host",
+                    url,
+                )
 
         logger.info(
             "Using Qdrant endpoint: %s (api_key=%s)",
@@ -105,24 +97,7 @@ class QdrantVectorStore:
             _mask_api_key(client_kwargs.get("api_key")),
         )
 
-        try:
-            self._client = QdrantClient(**client_kwargs)
-        except TypeError as exc:
-            if "httpx_client" in client_kwargs and "httpx_client" in str(exc):
-                logger.warning(
-                    "Qdrant client rejected custom httpx_client; retrying with scalar timeouts"
-                )
-                httpx_obj = client_kwargs.pop("httpx_client", None)
-                # ensure the bespoke client does not leak resources if unused
-                if httpx_obj is not None:
-                    try:
-                        httpx_obj.close()
-                    except Exception:  # pragma: no cover - best effort cleanup
-                        logger.debug("Failed to close unused httpx client", exc_info=True)
-                self._httpx_client = None
-                self._client = QdrantClient(**client_kwargs)
-            else:
-                raise
+        self._client = QdrantClient(**client_kwargs)
         self._server_version = self._fetch_server_version()
         logger.info(
             "Qdrant runtime: client=%s server=%s embedding_model=%s",
