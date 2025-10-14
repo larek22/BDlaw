@@ -43,10 +43,12 @@ def _make_chunk_id(
         .replace("{source_basename}", source_basename)
         .replace("{source}", source)
     )
+    seed = f"{source}|{start}|{end}|{index}"
     if "{uuid" in pattern:
-        candidate = candidate.replace("{uuid}", uuid.uuid4().hex)
+        candidate = candidate.replace(
+            "{uuid}", uuid.uuid5(uuid.NAMESPACE_URL, seed).hex
+        )
     if plan.id_strategy.ensure_uuid_if_missing and "{" not in pattern:
-        seed = f"{source}|{start}|{end}|{index}"
         candidate = f"{candidate}:{uuid.uuid5(uuid.NAMESPACE_URL, seed).hex}"
     return candidate
 
@@ -84,6 +86,11 @@ def apply_plan(
             window_tokens = []
             window_token_total = 0
             return
+        token_count = sum(window_tokens)
+        if token_count > policy.max_tokens:
+            raise RuntimeError(
+                f"Chunk tokens {token_count} exceed max {policy.max_tokens}"
+            )
         start_pos = 0
         end_pos = 0
         if window_meta:
@@ -138,7 +145,7 @@ def apply_plan(
         chunks.append(
             Chunk(
                 text=text,
-                tokens=sum(window_tokens),
+                tokens=token_count,
                 start=start_pos,
                 end=end_pos,
                 meta=chunk_meta,

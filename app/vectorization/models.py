@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Literal, Optional
 
 DistanceMetric = Literal["cosine", "dot", "euclid"]
-PlanSource = Literal["gpt", "fallback", "preset"]
+PlanSource = Literal["gpt", "gpt(normalized)", "fallback", "fallback-ru", "preset"]
 ChunkingMode = Literal["by_headings", "by_paragraphs", "by_records"]
 
 
@@ -116,6 +116,7 @@ class VectorizationPlan:
     payload_schema: PayloadSchema = field(default_factory=PayloadSchema)
     quality_checks: QualityChecks = field(default_factory=QualityChecks)
     test_queries: List[str] = field(default_factory=list)
+    planner_model: Optional[str] = None
 
     def model_dump(self) -> Dict[str, object]:
         return asdict(self)
@@ -151,6 +152,7 @@ class VectorizationPlan:
             payload_schema=PayloadSchema(**payload.get("payload_schema", {})),
             quality_checks=QualityChecks(**payload.get("quality_checks", {})),
             test_queries=list(payload.get("test_queries", []) or []),
+            planner_model=payload.get("planner_model"),
         )
 
     @staticmethod
@@ -162,7 +164,16 @@ class VectorizationPlan:
                 "collection_name": {"type": "string"},
                 "embedding_model": {"type": "string"},
                 "distance": {"enum": ["cosine", "dot", "euclid"]},
-                "plan_source": {"enum": ["gpt", "fallback", "preset"]},
+                "plan_source": {
+                    "enum": [
+                        "gpt",
+                        "gpt(normalized)",
+                        "fallback",
+                        "fallback-ru",
+                        "preset",
+                    ]
+                },
+                "planner_model": {"type": ["string", "null"]},
                 "id_strategy": {
                     "type": "object",
                     "properties": {

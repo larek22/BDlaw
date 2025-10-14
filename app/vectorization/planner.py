@@ -17,6 +17,7 @@ from .models import (
     DistanceMetric,
     HierarchyRules,
     IdStrategy,
+    PlanSource,
     PreambleRules,
     PayloadSchema,
     PlanPreview,
@@ -71,6 +72,188 @@ def _looks_like_russian_code(blocks: Sequence[Block]) -> bool:
     return False
 
 
+def _normalize_plan_dict(
+    plan_data: Dict[str, object],
+    *,
+    blocks: Sequence[Block],
+    context: PlanningContext,
+) -> Dict[str, object]:
+    """Sanitise GPT plans to align with our schema and expectations."""
+
+    cloned = json.loads(json.dumps(plan_data)) if plan_data else {}
+    looks_russian = _looks_like_russian_code(blocks)
+
+    cloned["doc_type"] = context.file_type
+    cloned["collection_name"] = context.collection_name
+    cloned["embedding_model"] = context.embedding_model
+    cloned["distance"] = context.distance
+
+    payload_schema = cloned.get("payload_schema")
+    if not isinstance(payload_schema, dict):
+        payload_schema = {}
+    fields = payload_schema.get("fields")
+    if not isinstance(fields, dict):
+        fields = {}
+    else:
+        fields = dict(fields)
+    if "title" in fields and "title_text" not in fields:
+        fields["title_text"] = fields.pop("title")
+    if "body" in fields and "body_text" not in fields:
+        fields["body_text"] = fields.pop("body")
+    fields.setdefault("title_text", "string|null")
+    fields.setdefault("body_text", "string")
+    for key, value in list(fields.items()):
+        if not isinstance(value, str):
+            fields[key] = "string" if value is None else str(value)
+    for key, dtype in DEFAULT_PAYLOAD_FIELDS.items():
+        fields.setdefault(key, dtype)
+    payload_schema["fields"] = fields
+    cloned["payload_schema"] = payload_schema
+
+    id_strategy = cloned.get("id_strategy")
+    if not isinstance(id_strategy, dict):
+        id_strategy = {}
+    pattern = id_strategy.get("pattern")
+    if not isinstance(pattern, str) or not pattern.strip():
+        id_strategy["pattern"] = "auto:{start}-{end}:{index}"
+    id_strategy["ensure_uuid_if_missing"] = bool(
+        id_strategy.get("ensure_uuid_if_missing", True)
+    )
+    cloned["id_strategy"] = id_strategy
+
+    policy = cloned.get("chunking_policy")
+    if not isinstance(policy, dict):
+        policy = {}
+    mode = policy.get("mode")
+    has_headings = any(block.type == "heading" for block in blocks)
+    if looks_russian:
+        policy["mode"] = "by_headings"
+    elif mode not in {"by_headings", "by_paragraphs", "by_records"}:
+        policy["mode"] = "by_headings" if has_headings else "by_paragraphs"
+    max_tokens = policy.get("max_tokens")
+    try:
+        max_tokens_int = int(max_tokens)
+    except (TypeError, ValueError):
+        max_tokens_int = context.hard_cap
+    if looks_russian:
+        max_tokens_int = min(max_tokens_int, 900)
+    max_tokens_int = max(1, min(max_tokens_int, context.hard_cap))
+    policy["max_tokens"] = max_tokens_int
+    overlap = policy.get("overlap_tokens", 120)
+    try:
+        overlap_int = int(overlap)
+    except (TypeError, ValueError):
+        overlap_int = 120
+    if overlap_int >= max_tokens_int:
+        overlap_int = max(0, min(120, max_tokens_int - 1))
+    policy["overlap_tokens"] = max(0, overlap_int)
+    split_on = policy.get("split_on_headings")
+    if isinstance(split_on, (tuple, set)):
+        split_on = list(split_on)
+    elif isinstance(split_on, list):
+        split_on = [str(item) for item in split_on if item]
+    elif split_on:
+        split_on = [str(split_on)]
+    else:
+        split_on = []
+    if looks_russian:
+        split_on = ["article"]
+    policy["split_on_headings"] = split_on
+    policy.setdefault("keep_lists_intact", True)
+    policy.setdefault("keep_tables_intact", True)
+    policy.setdefault("merge_short_paragraphs_under_tokens", 80)
+    cloned["chunking_policy"] = policy
+
+    hierarchy = cloned.get("hierarchy_rules")
+    if not isinstance(hierarchy, dict):
+        hierarchy = {}
+    heading_regex = hierarchy.get("heading_regex")
+    if not isinstance(heading_regex, dict):
+        heading_regex = {}
+    if looks_russian:
+        heading_regex.setdefault(
+            "section", r"(?im)^\s*Раздел\s+([IVXLC]+|\d+)\b"
+        )
+        heading_regex.setdefault("part", r"(?im)^\s*Часть\s+(\d+)\b")
+        heading_regex.setdefault("chapter", r"(?im)^\s*Глава\s+(\d+)\b")
+        heading_regex.setdefault(
+            "article", r"(?im)^\s*(Статья|Ст\.)\s+(\d+)\b"
+        )
+        hierarchy.setdefault(
+            "version_regex", r"(?im)от\s+(\d{2}\.\d{2}\.\d{4})"
+        )
+        hierarchy.setdefault(
+            "path_fields",
+            ["section", "part", "chapter", "article", "version_date"],
+        )
+    else:
+        hierarchy.setdefault(
+            "path_fields",
+            hierarchy.get("path_fields")
+            or ["corpus", "section", "part", "chapter", "article", "version"],
+        )
+    hierarchy["heading_regex"] = heading_regex
+    cloned["hierarchy_rules"] = hierarchy
+
+    preamble = cloned.get("preamble_rules")
+    if not isinstance(preamble, dict):
+        preamble = {}
+    drop_heading = preamble.get("drop_before_first_heading")
+    if looks_russian:
+        preamble["drop_before_first_heading"] = "article"
+    elif drop_heading is not None and not isinstance(drop_heading, str):
+        preamble["drop_before_first_heading"] = None
+    exclude = preamble.get("exclude_regexes")
+    if isinstance(exclude, list):
+        exclude_list = [pattern for pattern in exclude if isinstance(pattern, str)]
+    else:
+        exclude_list = []
+    if looks_russian:
+        for pattern in [
+            r"(?im)^\(в ред\.",
+            r"(?im)^Принят\s+Государственной Думой",
+            r"(?im)^Одобрен\s+Советом Федерации",
+            r"(?im)^Оглавление\b",
+        ]:
+            if pattern not in exclude_list:
+                exclude_list.append(pattern)
+    preamble["exclude_regexes"] = exclude_list
+    max_frontmatter = preamble.get("max_frontmatter_chars", 8000)
+    try:
+        max_frontmatter_int = int(max_frontmatter)
+    except (TypeError, ValueError):
+        max_frontmatter_int = 8000
+    preamble["max_frontmatter_chars"] = max(0, max_frontmatter_int)
+    cloned["preamble_rules"] = preamble
+
+    quality = cloned.get("quality_checks")
+    if not isinstance(quality, dict):
+        quality = {}
+    quality["min_chunks"] = int(quality.get("min_chunks", 1)) or 1
+    max_tokens_per_chunk = quality.get("max_tokens_per_chunk")
+    try:
+        max_tokens_per_chunk_int = int(max_tokens_per_chunk)
+    except (TypeError, ValueError):
+        max_tokens_per_chunk_int = policy["max_tokens"]
+    max_tokens_per_chunk_int = min(max_tokens_per_chunk_int, policy["max_tokens"])
+    quality["max_tokens_per_chunk"] = max_tokens_per_chunk_int
+    quality["forbid_empty_text"] = bool(quality.get("forbid_empty_text", True))
+    quality["dedupe_near_duplicates"] = bool(
+        quality.get("dedupe_near_duplicates", True)
+    )
+    cloned["quality_checks"] = quality
+
+    test_queries = cloned.get("test_queries")
+    if not isinstance(test_queries, list):
+        test_queries = []
+    else:
+        test_queries = [str(item) for item in test_queries if isinstance(item, str)]
+    cloned["test_queries"] = test_queries
+
+    cloned["plan_source"] = "gpt(normalized)"
+    return cloned
+
+
 def build_fallback_plan(
     *,
     blocks: Sequence[Block],
@@ -123,12 +306,16 @@ def build_fallback_plan(
 
     source_name = Path(blocks[0].path).stem if blocks else "document"
 
+    plan_source: PlanSource = "fallback"
+    if looks_russian and mode == "by_headings":
+        plan_source = "fallback-ru"
+
     return VectorizationPlan(
         doc_type=context.file_type,
         collection_name=context.collection_name,
         embedding_model=context.embedding_model,
         distance=context.distance,
-        plan_source="fallback",
+        plan_source=plan_source,
         id_strategy=IdStrategy(
             pattern=f"auto:{source_name}:{{start}}-{{end}}:{{index}}",
             ensure_uuid_if_missing=True,
@@ -150,11 +337,24 @@ def build_fallback_plan(
 class GPTPlanner:
     """Wrapper around the OpenAI API to request a plan."""
 
-    def __init__(self, *, model: str, api_key: str) -> None:
+    def __init__(self, *, models: Sequence[str] | None = None, api_key: str) -> None:
         if OpenAI is None:
             raise RuntimeError("openai package not available")
         self.client = OpenAI(api_key=api_key)
-        self.model = model
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for name in list(models or []) + list(ALLOWED_PLANNER_MODELS):
+            if not name:
+                continue
+            if name not in seen:
+                seen.add(name)
+                ordered.append(name)
+        self._models: list[str] = ordered or list(ALLOWED_PLANNER_MODELS)
+        self._last_model_used: str | None = None
+
+    @property
+    def last_model_used(self) -> str | None:
+        return self._last_model_used
 
     def plan(
         self,
@@ -171,14 +371,54 @@ class GPTPlanner:
             "Return ONLY valid JSON that conforms exactly to the provided schema. No prose."
         )
         user_prompt = self._build_prompt(context, outline, samples, schema)
-        result = self._call_model(system_prompt, user_prompt)
-        try:
-            return self._parse_plan(result)
-        except RuntimeError as exc:
-            logger.debug("GPT plan invalid, attempting repair: %s", exc)
-            repair_prompt = self._build_repair_prompt(schema, str(exc))
-            repaired = self._call_model(system_prompt, repair_prompt)
-            return self._parse_plan(repaired)
+
+        errors: list[str] = []
+        for model_name in self._models:
+            try:
+                payload = self._call_model(model_name, system_prompt, user_prompt)
+            except Exception as exc:
+                logger.warning("Planner call failed for %s: %s", model_name, exc)
+                errors.append(f"{model_name}: {exc}")
+                continue
+
+            try:
+                plan = self._build_plan_from_payload(
+                    payload,
+                    model_name=model_name,
+                    blocks=blocks,
+                    context=context,
+                )
+                self._last_model_used = model_name
+                return plan
+            except RuntimeError as exc:
+                logger.debug(
+                    "GPT plan invalid for model %s, attempting repair: %s",
+                    model_name,
+                    exc,
+                )
+                repair_prompt = self._build_repair_prompt(schema, str(exc))
+                try:
+                    repaired_payload = self._call_model(
+                        model_name, system_prompt, repair_prompt
+                    )
+                    plan = self._build_plan_from_payload(
+                        repaired_payload,
+                        model_name=model_name,
+                        blocks=blocks,
+                        context=context,
+                    )
+                    self._last_model_used = model_name
+                    return plan
+                except Exception as repair_exc:
+                    logger.warning(
+                        "Planner repair failed for %s: %s", model_name, repair_exc
+                    )
+                    errors.append(f"{model_name}: {repair_exc}")
+                    continue
+
+        raise RuntimeError(
+            "All planner models failed: " + ("; ".join(errors) if errors else "no models available")
+        )
 
     def _build_outline(self, blocks: Sequence[Block]) -> str:
         headings = [block.text for block in blocks if block.type == "heading"]
@@ -231,7 +471,32 @@ class GPTPlanner:
             "Return ONLY valid JSON that matches the schema exactly. No prose. No comments."
         )
 
-    def _call_model(self, system_prompt: str, user_prompt: str) -> str:
+    def _build_plan_from_payload(
+        self,
+        payload: str,
+        *,
+        model_name: str,
+        blocks: Sequence[Block],
+        context: PlanningContext,
+    ) -> VectorizationPlan:
+        data = self._parse_plan_payload(payload)
+        normalized = _normalize_plan_dict(
+            data,
+            blocks=blocks,
+            context=context,
+        )
+        normalized["plan_source"] = "gpt(normalized)"
+        normalized["planner_model"] = model_name
+        normalized["collection_name"] = context.collection_name
+        normalized["embedding_model"] = context.embedding_model
+        normalized["distance"] = context.distance
+        normalized["doc_type"] = context.file_type
+        try:
+            return VectorizationPlan.from_dict(normalized)
+        except Exception as exc:
+            raise RuntimeError(f"Plan validation failed: {exc}") from exc
+
+    def _call_model(self, model_name: str, system_prompt: str, user_prompt: str) -> str:
         user_content = [
             {
                 "type": "text",
@@ -242,51 +507,62 @@ class GPTPlanner:
         if responses_api is not None:
             try:
                 response = responses_api.create(  # type: ignore[call-arg]
-                    model=self.model,
+                    model=model_name,
                     instructions=system_prompt,
                     input=[{"role": "user", "content": user_content}],
                     temperature=0,
                     max_output_tokens=2000,
                 )
-            except AttributeError:
-                logger.warning(
-                    "OpenAI client has no 'responses' helpers; falling back to chat.completions"
-                )
             except Exception as exc:
-                raise RuntimeError("OpenAI Responses API call failed") from exc
+                logger.warning(
+                    "Planner Responses failed for %s: %r", model_name, exc
+                )
             else:
                 text = getattr(response, "output_text", None)
                 if text:
+                    logger.info("Planner success via Responses API with model %s", model_name)
                     return text
                 try:
-                    return response.output[0].content[0].text  # type: ignore[index]
+                    result = response.output[0].content[0].text  # type: ignore[index]
                 except Exception as exc:  # pragma: no cover - SDK quirks
-                    raise RuntimeError("Unexpected Responses payload structure") from exc
+                    logger.warning(
+                        "Planner Responses payload parse failed for %s: %r",
+                        model_name,
+                        exc,
+                    )
+                else:
+                    logger.info(
+                        "Planner success via Responses API with model %s", model_name
+                    )
+                    return result
+
         chat_api = getattr(getattr(self.client, "chat", None), "completions", None)
         if chat_api is None:  # pragma: no cover - protective guard for unexpected SDKs
             raise RuntimeError("OpenAI client does not provide a supported completion API")
-        response = chat_api.create(
-            model=self.model,
-            temperature=0,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
         try:
-            return response.choices[0].message.content  # type: ignore[index]
+            response = chat_api.create(
+                model=model_name,
+                temperature=0,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+        except Exception as exc:
+            logger.warning("Planner Chat failed for %s: %r", model_name, exc)
+            raise RuntimeError(str(exc)) from exc
+        try:
+            result = response.choices[0].message.content  # type: ignore[index]
         except Exception as exc:  # pragma: no cover - defensive guard
             raise RuntimeError("Unexpected GPT chat response structure") from exc
+        logger.info("Planner success via Chat Completions with model %s", model_name)
+        return result
 
-    def _parse_plan(self, payload: str) -> VectorizationPlan:
+    def _parse_plan_payload(self, payload: str) -> Dict[str, object]:
         try:
-            data = json.loads(payload)
+            return json.loads(payload)
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"Invalid JSON from GPT: {exc}") from exc
-        try:
-            return VectorizationPlan.from_dict(data)
-        except Exception as exc:
-            raise RuntimeError(f"Plan validation failed: {exc}") from exc
 
 
 class VectorizationPlanner:
@@ -316,33 +592,33 @@ class VectorizationPlanner:
 
     def _generate_plan(self, *, blocks: Sequence[Block], context: PlanningContext) -> VectorizationPlan:
         candidate_models = self._candidate_models(context)
-        for model_name in candidate_models + ["fallback"]:
+        fallback_key = "fallback-ru" if _looks_like_russian_code(blocks) else "fallback"
+        for model_name in [*candidate_models, fallback_key]:
             cache_key = self._cache_key(blocks, context, model_name)
             cached = self._plan_cache.get(cache_key)
             if cached is not None:
                 return VectorizationPlan.from_dict(json.loads(json.dumps(cached)))
 
         if context.api_key:
-            for model_name in candidate_models:
-                try:
-                    planner = GPTPlanner(model=model_name, api_key=context.api_key)
-                except Exception as exc:  # pragma: no cover - client initialisation issues
-                    logger.warning("Unable to initialise GPT planner (%s): %s", model_name, exc)
-                    continue
+            try:
+                planner = GPTPlanner(models=candidate_models, api_key=context.api_key)
+            except Exception as exc:  # pragma: no cover - client initialisation issues
+                logger.warning("Unable to initialise GPT planner: %s", exc)
+            else:
                 try:
                     plan = planner.plan(blocks=blocks, context=context)
                 except Exception as exc:
-                    logger.warning(
-                        "GPT planning with model %s failed: %s", model_name, exc
+                    logger.warning("GPT planning failed for all models: %s", exc)
+                else:
+                    model_key = planner.last_model_used or (
+                        candidate_models[0] if candidate_models else "gpt"
                     )
-                    continue
-                plan = plan.model_copy(update={"plan_source": "gpt"})
-                cache_key = self._cache_key(blocks, context, model_name)
-                self._plan_cache[cache_key] = plan.model_dump()
-                return plan
+                    cache_key = self._cache_key(blocks, context, model_key)
+                    self._plan_cache[cache_key] = plan.model_dump()
+                    return plan
 
         plan = build_fallback_plan(blocks=blocks, context=context)
-        cache_key = self._cache_key(blocks, context, "fallback")
+        cache_key = self._cache_key(blocks, context, fallback_key)
         self._plan_cache[cache_key] = plan.model_dump()
         return plan
 
@@ -409,6 +685,10 @@ class VectorizationPlanner:
             "embedding_model": plan.embedding_model,
             "distance": plan.distance,
         }
+        if stats["max_tokens"] > plan.chunking_policy.max_tokens:
+            raise RuntimeError(
+                "Preview chunk tokens exceed configured max_tokens"
+            )
         return PlanPreview(plan=plan, chunks=chunk_previews, stats=stats)
 
 

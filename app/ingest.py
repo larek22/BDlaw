@@ -34,12 +34,21 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
 logger = logging.getLogger(__name__)
 
 
-def make_point_id(doc_id: str, chunk_index: int) -> str:
-    """Deterministic point ids derived from document id and chunk index."""
+def make_point_id(
+    doc_id: str,
+    chunk_index: int,
+    *,
+    article_no: str | None = None,
+    version: str | None = None,
+) -> str:
+    """Deterministic point ids derived from document coordinates."""
 
-    # DEPRECATED: direct uuid.uuid5(NAMESPACE_URL, f"{doc_id}:{chunk_index}") implementation
-    # retained for reference. The shared helper now centralises ID generation.
-    return _shared_make_point_id(doc_id, chunk_index)
+    return _shared_make_point_id(
+        doc_id,
+        chunk_index,
+        version=version,
+        article_no=article_no,
+    )
 
 
 def expected_chunk_id(chunk: ChunkRecord) -> str:
@@ -249,6 +258,17 @@ class IngestService:
                 report(
                     f"Plan produced no chunks for {path.name}; skipping",
                     level=logging.WARNING,
+                )
+                skipped += 1
+                continue
+            overage = [
+                chunk for chunk in chunk_result.chunks
+                if chunk.tokens > plan.chunking_policy.max_tokens
+            ]
+            if overage:
+                report(
+                    f"Plan for {path.name} produced chunk exceeding max tokens ({overage[0].tokens}>{plan.chunking_policy.max_tokens}); skipping",
+                    level=logging.ERROR,
                 )
                 skipped += 1
                 continue

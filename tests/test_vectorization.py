@@ -219,16 +219,20 @@ def test_planner_allowlist_retry(monkeypatch, sample_blocks: list[Block]) -> Non
     calls: list[str] = []
 
     class DummyPlanner:
-        def __init__(self, model: str, api_key: str) -> None:
-            self.model = model
+        def __init__(self, *, models, api_key: str) -> None:
+            self.models = list(models)
+            self.last_model_used = None
 
         def plan(self, *, blocks, context) -> VectorizationPlan:  # type: ignore[override]
-            calls.append(self.model)
-            if self.model == "gpt-4.1":
-                raise RuntimeError("model not allowed")
-            return build_fallback_plan(blocks=blocks, context=context).model_copy(
-                update={"plan_source": "gpt"}
-            )
+            for model in self.models:
+                calls.append(model)
+                if model == "gpt-4.1":
+                    continue
+                self.last_model_used = model
+                return build_fallback_plan(blocks=blocks, context=context).model_copy(
+                    update={"plan_source": "gpt(normalized)", "planner_model": model}
+                )
+            raise RuntimeError("model not allowed")
 
     monkeypatch.setattr(
         "app.vectorization.planner.GPTPlanner",
@@ -246,14 +250,15 @@ def test_planner_allowlist_retry(monkeypatch, sample_blocks: list[Block]) -> Non
         api_key="test",
     )
     preview = planner.analyze(blocks=sample_blocks, context=context)
-    assert preview.plan.plan_source == "gpt"
+    assert preview.plan.plan_source == "gpt(normalized)"
     assert calls == ["gpt-4.1", "gpt-4o-mini"]
 
 
 def test_planner_ru_fallback_when_models_fail(monkeypatch, russian_blocks: list[Block]) -> None:
     class FailingPlanner:
-        def __init__(self, model: str, api_key: str) -> None:
-            self.model = model
+        def __init__(self, *, models, api_key: str) -> None:
+            self.models = list(models)
+            self.last_model_used = None
 
         def plan(self, *, blocks, context):  # type: ignore[override]
             raise RuntimeError("boom")
@@ -275,7 +280,7 @@ def test_planner_ru_fallback_when_models_fail(monkeypatch, russian_blocks: list[
     )
     preview = planner.analyze(blocks=russian_blocks, context=context)
     plan = preview.plan
-    assert plan.plan_source == "fallback"
+    assert plan.plan_source == "fallback-ru"
     assert plan.chunking_policy.split_on_headings == ["article"]
 
 
