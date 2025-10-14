@@ -89,6 +89,13 @@ class EmbeddingClient:
         self._total_cached = 0
         self._total_requests = 0
         self._total_tokens = 0
+        self._chunk_size_tokens = settings.ingest.chunk_size_tokens
+        self._chunk_overlap_tokens = settings.ingest.overlap_tokens
+        logger.info(
+            "Embedding chunk policy: size_tokens=%d overlap_tokens=%d",
+            self._chunk_size_tokens,
+            self._chunk_overlap_tokens,
+        )
 
     def embed_texts(
         self,
@@ -133,15 +140,26 @@ class EmbeddingClient:
                             input=payload,
                         )
                         elapsed = time.perf_counter() - began
+                        usage_tokens = None
+                        usage_obj = getattr(response, "usage", None)
+                        if usage_obj is not None:
+                            usage_tokens = getattr(usage_obj, "total_tokens", None)
+                        logged_tokens = (
+                            usage_tokens
+                            if usage_tokens is not None
+                            else token_estimate if token_estimate is not None else "n/a"
+                        )
                         logger.info(
                             "Embedded %d unique texts (model=%s tokens=%s duration=%.2fs)",
                             len(batch_shas),
                             model,
-                            token_estimate if token_estimate is not None else "n/a",
+                            logged_tokens,
                             elapsed,
                         )
                         self._total_requests += 1
-                        if token_estimate is not None:
+                        if usage_tokens is not None:
+                            self._total_tokens += usage_tokens
+                        elif token_estimate is not None:
                             self._total_tokens += token_estimate
                         break
                     except Exception as exc:  # pragma: no cover - network errors
@@ -186,6 +204,14 @@ class EmbeddingClient:
             "tokens": float(self._total_tokens),
             "cost": cost,
         }
+
+    @property
+    def chunk_size_tokens(self) -> int:
+        return self._chunk_size_tokens
+
+    @property
+    def chunk_overlap_tokens(self) -> int:
+        return self._chunk_overlap_tokens
 
 
 def _estimate_tokens(texts: Sequence[str], model: str) -> int | None:

@@ -122,6 +122,7 @@ def make_chunk_id(
     chunk_sha: str | None = None,
     plan_version: str | None = None,
     parser_version: str | None = None,
+    article_no: str | None = None,
 ) -> str:
     """Generate a deterministic identifier for a chunk."""
 
@@ -133,6 +134,7 @@ def make_chunk_id(
         chunk_index,
         version=version_marker,
         chunk_sha=chunk_sha,
+        article_no=article_no,
     )
 
 
@@ -141,6 +143,8 @@ class ProcessedDocument:
     normalized_text_path: Path
     article_json_path: Path
     chunk_json_path: Path
+    manifest_path: Path
+    pending_manifest_path: Path
     articles: List[ArticleRecord]
     chunks: List[ChunkRecord]
     doc_ids_changed: List[str]
@@ -491,14 +495,17 @@ class LegalCorpusBuilder:
         self._write_jsonl(chunk_path, (chunk.__dict__ for chunk in chunk_records))
 
         manifest_path = self.repository.manifest_path(corpus_slug, part_slug)
+        pending_manifest_path = manifest_path.with_name(manifest_path.name + ".pending")
         existing_manifest = self._load_manifest(manifest_path)
         new_manifest, changed, unchanged = self._build_manifest(chunk_records, existing_manifest)
-        self._write_manifest(manifest_path, new_manifest)
+        self._write_manifest(pending_manifest_path, new_manifest)
 
         return ProcessedDocument(
             normalized_text_path=normalized_path,
             article_json_path=article_path,
             chunk_json_path=chunk_path,
+            manifest_path=manifest_path,
+            pending_manifest_path=pending_manifest_path,
             articles=articles,
             chunks=chunk_records,
             doc_ids_changed=changed,
@@ -830,6 +837,7 @@ class LegalCorpusBuilder:
             chunk_sha=body_sha,
             plan_version=plan_version,
             parser_version=PARSER_VERSION,
+            article_no=article.hierarchy.article_no,
         )
         chunk_key = f"{article.doc_id}#c{chunk_index:04d}"
         source_path = article.source_relative_path or article.source_file_name
