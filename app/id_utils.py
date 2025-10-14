@@ -16,23 +16,31 @@ def make_point_id(
     chunk_index: int,
     version: str | None = None,
     chunk_sha: str | None = None,
+    *,
+    article_no: str | None = None,
 ) -> str:
     """Return a deterministic UUIDv5 for the given chunk metadata.
 
-    Qdrant accepts either unsigned integers or UUID strings as point
-    identifiers. We rely on UUIDv5 so the IDs stay stable between runs while
-    still being valid according to the API contract. The ``doc_id`` already
-    encodes the legal document version (e.g. ``v2006-12-18``), but an
-    additional ``version`` field can be supplied for future-proofing (for
-    example, differentiating embeddings generated with a new chunking policy).
+    The historical implementation derived identifiers from a ``chunk_sha``
+    whenever available. That behaviour caused point identifiers to drift when
+    payload hashing logic changed, ultimately leading to silent overwrites in
+    Qdrant. The new logic keys strictly off stable document coordinates so the
+    same (doc_id, article_no, chunk_index) tuple always yields the same UUID.
     """
 
-    if chunk_sha:
-        name = chunk_sha
-    else:
-        name = f"{doc_id}|{chunk_index}"
+    # DEPRECATED: chunk_sha based identifiers are retained for reference only.
+    # if chunk_sha:
+    #     name = chunk_sha
+    # else:
+    #     name = f"{doc_id}|{chunk_index}"
+    parts: list[str] = [doc_id.strip(), str(chunk_index)]
+    if article_no:
+        parts.insert(1, article_no.strip())
     if version:
-        name = f"{name}|{version}"
+        parts.append(version.strip())
+    name = "|".join(part for part in parts if part)
+    if not name:
+        raise ValueError("Cannot generate point id without coordinates")
     return str(uuid.uuid5(_POINT_NAMESPACE, name))
 
 
