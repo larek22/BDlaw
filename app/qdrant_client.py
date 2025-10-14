@@ -641,6 +641,36 @@ class QdrantVectorStore:
         if points:
             self._upsert_points_dynamic(target_collection, points)
 
+    def upsert_collection_plan(
+        self,
+        *,
+        collection: str,
+        plan_json: Dict[str, object],
+        plan_hash: str,
+        plan_source: str,
+        embedding_model: str | None = None,
+    ) -> None:
+        vector_dim = self.vector_size_for_model(embedding_model or self.settings.openai_models.embedding)
+        zero_dimension = max(1, int(vector_dim))
+        zero_vector = [0.0] * zero_dimension
+        payload = {
+            "meta_type": "collection_plan",
+            "collection": collection,
+            "plan_json": plan_json,
+            "plan_hash": plan_hash,
+            "plan_source": plan_source,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+        point = rest.PointStruct(
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"plan:{collection}:{plan_hash}")),
+            vector={
+                "title_vec": zero_vector,
+                "body_vec": zero_vector,
+            },
+            payload=payload,
+        )
+        self._upsert_points_dynamic(collection, [point])
+
     def _upsert_points_dynamic(
         self, collection: str, points: Sequence[rest.PointStruct]
     ) -> None:

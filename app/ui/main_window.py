@@ -48,17 +48,25 @@ class IngestWorker(QObject):
     error = Signal(str)
     progress = Signal(str)
 
-    def __init__(self, service: IngestService, paths: Sequence[Path], recreate: bool) -> None:
+    def __init__(
+        self,
+        service: IngestService,
+        paths: Sequence[Path],
+        recreate: bool,
+        approved_plans: dict[Path, VectorizationPlan] | None = None,
+    ) -> None:
         super().__init__()
         self.service = service
         self.paths = paths
         self.recreate = recreate
+        self.approved_plans = approved_plans or {}
 
     def run(self) -> None:  # pragma: no cover - requires Qt thread
         try:
             stats = self.service.ingest(
                 self.paths,
                 recreate=self.recreate,
+                approved_plans=self.approved_plans,
                 progress_cb=self.progress.emit,
             )
             self.finished.emit(
@@ -515,7 +523,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Reset DB", message)
 
     def _analyze_plan(self, path: str) -> None:
-        path_obj = Path(path)
+        path_obj = Path(path).resolve()
         if not path_obj.exists():
             QMessageBox.critical(self, "Analyze", f"File not found: {path_obj}")
             return
@@ -546,7 +554,8 @@ class MainWindow(QMainWindow):
         dialog = VectorizationPlanDialog(artifacts.preview, self)
         result = dialog.exec()
         if result == QDialog.Accepted:
-            self._approved_plans[path_obj] = artifacts.plan
+            selected_plan = dialog.plan()
+            self._approved_plans[path_obj] = selected_plan
             self.ingest_tab.append_log(f"Plan approved for {path_obj.name}")
         else:
             self.ingest_tab.append_log(f"Plan cancelled for {path_obj.name}")
@@ -557,7 +566,7 @@ class MainWindow(QMainWindow):
         if not self.ingest_service:
             QMessageBox.critical(self, "Ingest", "Services not initialized")
             return
-        file_paths = [Path(p) for p in paths]
+        file_paths = [Path(p).resolve() for p in paths]
         for path_obj in file_paths:
             if path_obj in self._approved_plans:
                 self.ingest_tab.append_log(f"Using approved plan for {path_obj.name}")
@@ -566,7 +575,12 @@ class MainWindow(QMainWindow):
         self.ingest_tab.set_running(True)
         self.ingest_tab.append_log("Starting ingestion...")
         self._cleanup_worker("_ingest_thread", "_ingest_worker")
-        worker = IngestWorker(self.ingest_service, file_paths, recreate)
+        worker = IngestWorker(
+            self.ingest_service,
+            file_paths,
+            recreate,
+            approved_plans=self._approved_plans.copy(),
+        )
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)

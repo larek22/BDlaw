@@ -46,7 +46,8 @@ def _make_chunk_id(
     if "{uuid" in pattern:
         candidate = candidate.replace("{uuid}", uuid.uuid4().hex)
     if plan.id_strategy.ensure_uuid_if_missing and "{" not in pattern:
-        candidate = f"{candidate}:{uuid.uuid4().hex}"
+        seed = f"{source}|{start}|{end}|{index}"
+        candidate = f"{candidate}:{uuid.uuid5(uuid.NAMESPACE_URL, seed).hex}"
     return candidate
 
 
@@ -93,10 +94,36 @@ def apply_plan(
             index=chunk_index,
             source=blocks[0].path if blocks else "",
         )
-        chunk_meta = {
+        chunk_meta: Dict[str, object] = {
             "source_file": blocks[0].path if blocks else "",
             "index": chunk_index,
         }
+        if named_hierarchy:
+            chunk_meta["hierarchy"] = dict(named_hierarchy)
+            for field in plan.hierarchy_rules.path_fields:
+                if field in named_hierarchy:
+                    chunk_meta[field] = named_hierarchy[field]
+        heading_values = [value for _, value in sorted(current_heading.items())]
+        title_candidate = (
+            named_hierarchy.get("article")
+            or named_hierarchy.get("chapter")
+            or named_hierarchy.get("section")
+            or heading_values[-1]
+            if heading_values
+            else ""
+        )
+        if title_candidate:
+            chunk_meta["title_text"] = title_candidate
+        row_indices = [
+            meta.get("attrs", {}).get("row_index")
+            for meta in window_meta
+            if isinstance(meta.get("attrs", {}).get("row_index"), int)
+        ]
+        if row_indices:
+            chunk_meta["row_index"] = row_indices[-1]
+        source_path = blocks[0].path if blocks else ""
+        if source_path and "doc_id" not in chunk_meta:
+            chunk_meta["doc_id"] = Path(source_path).stem
         chunks.append(
             Chunk(
                 text=text,
@@ -107,6 +134,7 @@ def apply_plan(
                 chunk_id=chunk_id,
             )
         )
+        chunk_meta["plan_chunk_id"] = chunk_id
         chunk_index += 1
         if final:
             window_texts = []
@@ -122,7 +150,7 @@ def apply_plan(
             return
         new_texts: List[str] = []
         new_tokens: List[int] = []
-        new_meta: List[Dict[str, int]] = []
+        new_meta: List[Dict[str, object]] = []
         total = 0
         for text_piece, token_count, meta in reversed(list(zip(window_texts, window_tokens, window_meta))):
             new_texts.insert(0, text_piece)
@@ -136,8 +164,9 @@ def apply_plan(
         window_meta = new_meta
         window_token_total = sum(new_tokens)
 
-    window_meta: List[Dict[str, int]] = []
+    window_meta: List[Dict[str, object]] = []
     token_usage = 0
+    named_hierarchy: Dict[str, str] = {}
 
     def add_block_text(block: Block, text: str) -> None:
         nonlocal window_token_total, token_usage
@@ -156,7 +185,14 @@ def apply_plan(
             flush_chunk()
         window_texts.append(text)
         window_tokens.append(tokens)
-        window_meta.append(block.position or {"start": 0, "end": 0})
+        block_meta = {
+            "start": (block.position or {}).get("start", 0),
+            "end": (block.position or {}).get("end", 0),
+            "type": block.type,
+            "attrs": dict(block.attrs or {}),
+            "text": block.text,
+        }
+        window_meta.append(block_meta)
         window_token_total += tokens
 
     if policy.mode == "by_records":
@@ -195,6 +231,8 @@ def apply_plan(
         if block.type == "heading":
             level = int(block.attrs.get("level", 1))
             current_heading[level] = block.text
+            for deeper in [lvl for lvl in list(current_heading) if lvl > level]:
+                current_heading.pop(deeper, None)
             heading_text = block.text.strip()
             should_split = level in split_levels
             if split_names and heading_text:
@@ -203,6 +241,10 @@ def apply_plan(
                     if pattern and re.search(pattern, heading_text):
                         should_split = True
                         break
+            if heading_text:
+                for name, pattern in heading_regex.items():
+                    if pattern and re.search(pattern, heading_text):
+                        named_hierarchy[name] = heading_text
             if should_split and window_texts:
                 flush_chunk()
             if heading_text:
